@@ -1,0 +1,105 @@
+name: Windows
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+env:
+  SCCACHE_GHA_ENABLED: "true"
+
+jobs:
+  build-test:
+    name: Windows 2025 MSVC [${{ matrix.build_type == 'Release' && 'Release Build' || 'Debug Tests' }}]
+    runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [Release, Debug]
+
+    steps:
+      - name: Enable long paths in Git
+        shell: pwsh
+        run: git config --system core.longpaths true
+
+      - uses: actions/checkout@v3
+
+      - name: Set up MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1.13.0
+        with:
+          arch: x64
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: "v0.18.0"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install Python test dependencies
+        if: matrix.build_type == 'Debug'
+        run: python -m pip install pytest
+
+      - name: Configure CMake
+        run: |
+          # /Z7 avoids concurrent compiler PDB writes in Debug.
+          cmake -S . -B build -G Ninja `
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} `
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache `
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache `
+            -DCMAKE_CXX_FLAGS_DEBUG="/Z7 /Ob0 /Od /RTC1" `
+            -DPYTHON_ENFORCE_TESTS=${{ matrix.build_type == 'Debug' && 'ON' || 'OFF' }} `
+            -DWARNINGS_AS_ERRORS=ON
+
+      - name: Build Release library and bindings
+        if: matrix.build_type == 'Release'
+        run: cmake --build build --parallel --target ariadne-constraint-solving bindings
+
+      - name: Install Release library
+        if: matrix.build_type == 'Release'
+        run: cmake --install build --prefix "${{ runner.workspace }}/install"
+
+      - name: Prepare C++ constraint_solving tutorial
+        if: matrix.build_type == 'Release'
+        shell: pwsh
+        run: cmake -E copy_directory "$env:GITHUB_WORKSPACE/tutorials/tutorial_constraint_solving" "${{ runner.workspace }}/tutorial_constraint_solving"
+
+      - name: Build and check C++ constraint_solving tutorial
+        if: matrix.build_type == 'Release'
+        shell: pwsh
+        working-directory: ${{ runner.workspace }}/tutorial_constraint_solving
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="${{ runner.workspace }}/install" -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
+          cmake --build build --parallel
+          $env:PATH = "${{ runner.workspace }}\install\bin;$env:PATH"
+          & ".\build\tutorial_constraint_solving.exe"
+
+      - name: Check installed Python constraint_solving tutorial
+        if: matrix.build_type == 'Release'
+        shell: pwsh
+        working-directory: ${{ github.workspace }}/python/tutorials
+        run: |
+          $env:PYTHONPATH = "${{ runner.workspace }}\install\Lib\site-packages"
+          $env:PATH = "${{ runner.workspace }}\install\bin;$env:PATH"
+          python -c "import os, pathlib, pyariadne; p=pathlib.Path(pyariadne.__file__).resolve(); root=pathlib.Path(os.environ['PYTHONPATH']).resolve(); assert p.is_relative_to(root), (p, root)"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python tutorial_constraint_solving.py
+
+      - name: Verify uninstallation
+        if: matrix.build_type == 'Release'
+        run: cmake --build build --target uninstall
+
+      - name: Build Debug tests and bindings
+        if: matrix.build_type == 'Debug'
+        run: cmake --build build --parallel --target tests
+
+      - name: Run Debug C++ tests
+        if: matrix.build_type == 'Debug'
+        run: ctest --test-dir build -j $env:NUMBER_OF_PROCESSORS -LE python --output-on-failure
+
+      - name: Run Debug Python tests
+        if: matrix.build_type == 'Debug'
+        run: ctest --test-dir build -L python --output-on-failure
