@@ -85,22 +85,22 @@ Void export_constraint_solving(pybind11::module& module)
         .def_readwrite("strict_lower",&ConstraintPropagationConstraint::strict_lower)
         .def_readwrite("strict_upper",&ConstraintPropagationConstraint::strict_upper);
 
-    pybind11::class_<ConstraintSolver> solver(module,"ConstraintSolver");
-    solver.def(pybind11::init<>());
-    solver.def("feasible",
+    pybind11::class_<ConstraintSolver> solver_class(module,"ConstraintSolver");
+    solver_class.def(pybind11::init<>());
+    solver_class.def("feasible",
         (Pair<ValidatedKleenean,ConstraintSolver::ExactPointType>
         (ConstraintSolver::*)(const ExactBoxType&,const ValidatedVectorMultivariateFunction&,const ExactBoxType&)const)
         &ConstraintSolver::feasible);
-    solver.def("feasible",
+    solver_class.def("feasible",
         (Pair<ValidatedKleenean,ConstraintSolver::ExactPointType>
         (ConstraintSolver::*)(const ExactBoxType&,const List<ValidatedConstraint>&)const)
         &ConstraintSolver::feasible);
-    solver.def("check_feasibility",&ConstraintSolver::check_feasibility);
+    solver_class.def("check_feasibility",&ConstraintSolver::check_feasibility);
 
 
     // The C++ reducer modifies an UpperBoxType by reference; the Python
     // convenience overload returns both the proof flag and reduced box.
-    solver.def("reduce_box",
+    solver_class.def("reduce_box",
         [](ConstraintSolver const& solver, ExactBoxType const& domain,
            ValidatedVectorMultivariateFunction const& function,
            ExactBoxType const& codomain) {
@@ -109,7 +109,7 @@ Void export_constraint_solving(pybind11::module& module)
             return pybind11::make_tuple(rejected,reduced);
         });
 
-    solver.def("propagate_precompiled",
+    solver_class.def("propagate_precompiled",
         [](ConstraintSolver const& solver, ExactBoxType const& domain,
            std::vector<ConstraintPropagationConstraint> const& constraints,
            Bool monotone, Bool shaving, Bool hull) {
@@ -122,7 +122,7 @@ Void export_constraint_solving(pybind11::module& module)
           pybind11::arg("monotone")=false,pybind11::arg("shaving")=true,
           pybind11::arg("hull")=true);
 
-    solver.def("propagate_constraints",
+    solver_class.def("propagate_constraints",
         [](ConstraintSolver const& solver, ExactBoxType const& domain,
            List<ValidatedConstraint> const& constraints,
            Bool shaving, Bool hull) {
@@ -134,7 +134,7 @@ Void export_constraint_solving(pybind11::module& module)
         },pybind11::arg("domain"),pybind11::arg("constraints"),
           pybind11::arg("shaving")=true,pybind11::arg("hull")=true);
 
-    solver.def("propagate_hull_once",
+    solver_class.def("propagate_hull_once",
         [](ConstraintSolver const& solver, ExactBoxType const& domain,
            std::vector<ConstraintPropagationConstraint> const& constraints) {
             UpperBoxType reduced(domain);
@@ -144,7 +144,7 @@ Void export_constraint_solving(pybind11::module& module)
             return pybind11::make_tuple(rejected,reduced,statistics);
         });
 
-    solver.def("hull_reduce_box",
+    solver_class.def("hull_reduce_box",
         [](ConstraintSolver const& solver, ExactBoxType const& domain,
            ValidatedVectorMultivariateFunction const& function,
            ExactBoxType const& codomain) {
@@ -152,7 +152,7 @@ Void export_constraint_solving(pybind11::module& module)
             Bool rejected=solver.hull_reduce(reduced,function,codomain);
             return pybind11::make_tuple(rejected,reduced);
         });
-    solver.def("box_reduce_box",
+    solver_class.def("box_reduce_box",
         [](ConstraintSolver const& solver, ExactBoxType const& domain,
            ValidatedScalarMultivariateFunction const& function,
            ExactIntervalType const& bounds, SizeType coordinate) {
@@ -160,7 +160,7 @@ Void export_constraint_solving(pybind11::module& module)
             Bool rejected=solver.box_reduce(reduced,function,bounds,coordinate);
             return pybind11::make_tuple(rejected,reduced);
         });
-    solver.def("monotone_reduce_box",
+    solver_class.def("monotone_reduce_box",
         [](ConstraintSolver const& solver, ExactBoxType const& domain,
            ValidatedScalarMultivariateFunction const& function,
            ExactIntervalType const& bounds, SizeType coordinate) {
@@ -170,19 +170,19 @@ Void export_constraint_solving(pybind11::module& module)
         });
 
     // Keep C++-style in-place calls available for existing clients.
-    solver.def("hull_reduce",
+    solver_class.def("hull_reduce",
         (Bool(ConstraintSolver::*)(UpperBoxType&,const ValidatedScalarMultivariateFunction&,const ExactIntervalType&)const)
         &ConstraintSolver::hull_reduce);
-    solver.def("box_reduce",
+    solver_class.def("box_reduce",
         (Bool(ConstraintSolver::*)(UpperBoxType&,const ValidatedScalarMultivariateFunction&,const ExactIntervalType&,SizeType)const)
         &ConstraintSolver::box_reduce);
-    solver.def("monotone_reduce",
+    solver_class.def("monotone_reduce",
         (Bool(ConstraintSolver::*)(UpperBoxType&,const ValidatedScalarMultivariateFunction&,const ExactIntervalType&,SizeType)const)
         &ConstraintSolver::monotone_reduce);
-    solver.def("reduce",
+    solver_class.def("reduce",
         (Bool(ConstraintSolver::*)(UpperBoxType&,const List<ValidatedConstraint>&)const)
         &ConstraintSolver::reduce);
-    solver.def("reduce",
+    solver_class.def("reduce",
         (Bool(ConstraintSolver::*)(UpperBoxType&,const ValidatedVectorMultivariateFunction&,const ExactBoxType&)const)
         &ConstraintSolver::reduce);
 }
