@@ -1,6 +1,6 @@
-[submodule "ss/configuration"]
-	path = ss/configuration
+[submodule "cfg"]
+	path = ss/cfg
 	url = https://github.com/ariadne-cps/configuration
-[submodule "ss/nonlinear-programming"]
-	path = ss/nonlinear-programming
+[submodule "non"]
+	path = ss/non
 	url = https://github.com/ariadne-cps/nonlinear-programming
