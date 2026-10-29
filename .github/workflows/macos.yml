@@ -1,0 +1,108 @@
+name: macOS
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+env:
+  SCCACHE_GHA_ENABLED: "true"
+
+jobs:
+  build-test:
+    name: ${{ matrix.config.name }} [${{ matrix.build_type }}]
+    runs-on: ${{ matrix.config.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [Release, Debug]
+        config:
+          - { name: "macOS 26 arm AppleClang 21", os: macos-26, cxx: "/usr/bin/clang++" }
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: "v0.18.0"
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Install Python test dependencies
+        if: matrix.build_type == 'Debug'
+        run: python -m pip install pytest
+
+      - name: Get macOS concurrency
+        if: runner.os == 'macOS'
+        run: echo "NPROC=$(sysctl -n hw.ncpu)" >> "$GITHUB_ENV"
+
+      - name: Set up macOS dependencies
+        if: runner.os == 'macOS'
+        run: brew install ninja pkg-config
+
+      - name: Configure CMake
+        run: |
+          cmake -S . -B "${{ runner.workspace }}/build" -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DCMAKE_CXX_COMPILER=${{ matrix.config.cxx }} \
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache \
+            -DPYTHON_ENFORCE_TESTS=${{ matrix.build_type == 'Debug' && 'ON' || 'OFF' }} \
+            -DWARNINGS_AS_ERRORS=ON
+
+      - name: Build Release library and bindings
+        if: matrix.build_type == 'Release'
+        run: cmake --build "${{ runner.workspace }}/build" --parallel "$NPROC" --target ariadne-constraint-solving bindings
+
+      - name: Install Release library
+        if: matrix.build_type == 'Release'
+        run: cmake --install "${{ runner.workspace }}/build" --prefix "${{ runner.workspace }}/install"
+
+      - name: Prepare C++ constraint_solving tutorial
+        if: matrix.build_type == 'Release'
+        run: cmake -E copy_directory "$GITHUB_WORKSPACE/tutorials/tutorial_constraint_solving" "${{ runner.workspace }}/tutorial_constraint_solving"
+
+      - name: Build and check C++ constraint_solving tutorial
+        if: matrix.build_type == 'Release'
+        working-directory: ${{ runner.workspace }}/tutorial_constraint_solving
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_PREFIX_PATH="${{ runner.workspace }}/install" \
+            -DCMAKE_CXX_COMPILER=${{ matrix.config.cxx }} \
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
+          cmake --build build --parallel "$NPROC"
+          export LD_LIBRARY_PATH="${{ runner.workspace }}/install/lib:${LD_LIBRARY_PATH:-}"
+          export DYLD_LIBRARY_PATH="${{ runner.workspace }}/install/lib:${DYLD_LIBRARY_PATH:-}"
+          ./build/tutorial_constraint_solving
+
+      - name: Check installed Python constraint_solving tutorial
+        if: matrix.build_type == 'Release'
+        working-directory: ${{ github.workspace }}/python/tutorials
+        env:
+          PYTHONPATH: ${{ runner.workspace }}/install/lib/python3.13/site-packages
+          LD_LIBRARY_PATH: ${{ runner.workspace }}/install/lib
+          DYLD_LIBRARY_PATH: ${{ runner.workspace }}/install/lib
+        run: |
+          python -c "import os, pathlib, pyariadne; p=pathlib.Path(pyariadne.__file__).resolve(); root=pathlib.Path(os.environ['PYTHONPATH']).resolve(); assert p.is_relative_to(root), (p, root)"
+          python tutorial_constraint_solving.py
+
+      - name: Verify uninstallation
+        if: matrix.build_type == 'Release'
+        run: cmake --build "${{ runner.workspace }}/build" --target uninstall
+
+      - name: Build Debug tests and bindings
+        if: matrix.build_type == 'Debug'
+        run: cmake --build "${{ runner.workspace }}/build" --parallel "$NPROC" --target tests
+
+      - name: Run Debug C++ tests
+        if: matrix.build_type == 'Debug'
+        run: ctest --test-dir "${{ runner.workspace }}/build" -j "$NPROC" -LE python --output-on-failure
+
+      - name: Run Debug Python tests
+        if: matrix.build_type == 'Debug'
+        run: ctest --test-dir "${{ runner.workspace }}/build" -L python -V --output-on-failure
