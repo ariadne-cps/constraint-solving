@@ -4,3 +4,6 @@
 [submodule "non"]
 	path = ss/non
 	url = https://github.com/ariadne-cps/nonlinear-programming
+[submodule "tst"]
+	path = ss/tst
+	url = https://github.com/ariadne-cps/testing

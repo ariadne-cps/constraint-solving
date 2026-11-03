@@ -21,6 +21,15 @@ if(EXISTS "${PROJECT_SOURCE_DIR}/.git")
         CHAINS
             "configuration"
             "nonlinear-programming|configuration"
+            "nonlinear-programming|function|configuration"
+            "testing|configuration"
+            "nonlinear-programming|testing|configuration"
+    )
+    require_same_dependency_commit(Testing
+        CHAINS
+            "testing"
+            "nonlinear-programming|testing"
+            "nonlinear-programming|function|testing"
     )
 endif()
 
