@@ -96,7 +96,7 @@ jobs:
           LD_LIBRARY_PATH: ${{ runner.workspace }}/install/lib
           DYLD_LIBRARY_PATH: ${{ runner.workspace }}/install/lib
         run: |
-          python -c "import os, pathlib, pyariadne; p=pathlib.Path(pyariadne.__file__).resolve(); root=pathlib.Path(os.environ['PYTHONPATH']).resolve(); assert p.is_relative_to(root), (p, root)"
+          python -c "import os, pathlib, pyariadne_constraintsolving; p=pathlib.Path(pyariadne_constraintsolving.__file__).resolve(); root=pathlib.Path(os.environ['PYTHONPATH']).resolve(); assert p.is_relative_to(root), (p, root)"
           python tutorial_constraint_solving.py
 
       - name: Verify uninstallation

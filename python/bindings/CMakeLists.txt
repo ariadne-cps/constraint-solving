@@ -37,5 +37,6 @@ target_link_libraries(pyariadne-constraint_solving INTERFACE
 
 ariadne_add_python_module(
     NAME constraint_solving
+    MODULE_IMPORT_NAME pyariadne_constraintsolving
     MODULE_SOURCE constraint_solving_module.cpp
 )

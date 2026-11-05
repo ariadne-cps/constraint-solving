@@ -1,4 +1,4 @@
-from pyariadne import (
+from pyariadne_constraintsolving import (
     ConstraintSolver, ConstraintPropagationConstraint,
     ConstraintPropagationStatistics, ValidatedConstraint,
     ValidatedScalarMultivariateFunction, ValidatedVectorMultivariateFunction,
@@ -50,7 +50,7 @@ def test_strict_boundary_rejection():
     assert stats.hull_contractor_calls == 0
 
 
-from pyariadne import *
+from pyariadne_constraintsolving import *
 
 def exact_box(bounds):
     return FloatDPExactBox([{exact(a): exact(b)} for a,b in bounds])

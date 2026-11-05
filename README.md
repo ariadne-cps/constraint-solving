@@ -46,7 +46,3 @@ cmake --install build-release --prefix /path/to/install
 See `tutorials/tutorial_constraint_solving/tutorial_constraint_solving.cpp` and `python/tutorials/tutorial_constraint_solving.py` for examples of both propagation and feasibility.
 
 **Validation semantics:** propagation returns true when inconsistency is proved, even if the closed interval box remains nonempty for strict inequalities. Feasibility results may be indeterminate, and a numerical candidate is not automatically a certified existence witness.
-
-## License
-
-GNU General Public License v3.0 (or later where noted in source files).

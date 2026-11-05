@@ -96,7 +96,7 @@ jobs:
         run: |
           $env:PYTHONPATH = "${{ runner.workspace }}\install\Lib\site-packages"
           $env:PATH = "${{ runner.workspace }}\install\bin;$env:PATH"
-          python -c "import os, pathlib, pyariadne; p=pathlib.Path(pyariadne.__file__).resolve(); root=pathlib.Path(os.environ['PYTHONPATH']).resolve(); assert p.is_relative_to(root), (p, root)"
+          python -c "import os, pathlib, pyariadne_constraintsolving; p=pathlib.Path(pyariadne_constraintsolving.__file__).resolve(); root=pathlib.Path(os.environ['PYTHONPATH']).resolve(); assert p.is_relative_to(root), (p, root)"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python tutorial_constraint_solving.py
 
