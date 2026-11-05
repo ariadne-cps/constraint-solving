@@ -8,6 +8,7 @@
 [![codecov](https://codecov.io/gh/ariadne-cps/constraint-solving/branch/main/graph/badge.svg)](https://codecov.io/gh/ariadne-cps/constraint-solving)
 
 Ariadne Constraint Solving is a standalone C++20 library for validated numerical constraint solving. `ConstraintSolver` provides hull propagation, coordinate shaving, derivative-assisted monotone contraction, incremental propagation with cached procedures, and validated feasibility and infeasibility checks using nonlinear interior-point methods.
+Although independently maintained and usable, this repository is also part of the [Ariadne repository structure](https://github.com/ariadne-cps/ariadne/blob/main/doc/structure.md).
 
 ## Repository layout
 
@@ -22,7 +23,7 @@ The umbrella header is `ariadne-constraint-solving.hpp`.
 ## Dependencies
 
 - [ariadne-cps/nonlinear-programming](https://github.com/ariadne-cps/nonlinear-programming): nonlinear feasibility and interior-point methods.
-- [ariadne-cps/configuration](https://github.com/ariadne-cps/configuration): common CMake build infrastructure.
+- [ariadne-cps/build](https://github.com/ariadne-cps/build): common CMake build infrastructure.
 
 ## Build and test
 

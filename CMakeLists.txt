@@ -5,25 +5,25 @@ project(ConstraintSolving VERSION 1.0)
 option(WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 option(BUILD_PYTHON_BINDINGS "Build Python bindings" ON)
 
-if(NOT TARGET ariadne-configuration)
+if(NOT TARGET ariadne-build)
     find_package(Git REQUIRED)
     execute_process(COMMAND "${GIT_EXECUTABLE}" -C "${CMAKE_CURRENT_SOURCE_DIR}"
-                    submodule update --init -- ss/cfg
+                    submodule update --init -- ss/bui
                     RESULT_VARIABLE _result)
     if(_result)
-        message(FATAL_ERROR "Cannot initialize configuration submodule")
+        message(FATAL_ERROR "Cannot initialize build submodule")
     endif()
-    include("${CMAKE_CURRENT_SOURCE_DIR}/ss/cfg/cmake/ProjectOptions.cmake")
+    include("${CMAKE_CURRENT_SOURCE_DIR}/ss/bui/cmake/ProjectOptions.cmake")
 endif()
 
 if(EXISTS "${PROJECT_SOURCE_DIR}/.git")
-    require_same_dependency_commit(Configuration
+    require_same_dependency_commit(Build
         CHAINS
-            "configuration"
-            "nonlinear-programming|configuration"
-            "nonlinear-programming|function|configuration"
-            "testing|configuration"
-            "nonlinear-programming|testing|configuration"
+            "build"
+            "nonlinear-programming|build"
+            "nonlinear-programming|function|build"
+            "testing|build"
+            "nonlinear-programming|testing|build"
     )
     require_same_dependency_commit(Testing
         CHAINS
