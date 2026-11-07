@@ -12,14 +12,13 @@
 #include "geometry/box.hpp"
 #include "foundation/logical.hpp"
 #include "logging/logging.hpp"
-#include "threading/threading_command_line_interface.hpp"
-#include "utility/command_line_interface.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <iomanip>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -44,8 +43,7 @@ struct Selection {
     Bool verify_only=false;
 };
 
-unsigned unsigned_argument(String const& value) {
-    std::string text(value);
+unsigned unsigned_argument(std::string const& text) {
     if(text.empty() or text.front()=='-')
         throw std::invalid_argument("expected nonnegative integer");
     std::size_t used=0u;
@@ -55,8 +53,7 @@ unsigned unsigned_argument(String const& value) {
     return static_cast<unsigned>(number);
 }
 
-std::vector<std::string> shapes_argument(String const& value) {
-    std::string input(value);
+std::vector<std::string> shapes_argument(std::string const& input) {
     if(input.empty() or input.front()==',' or input.back()==',')
         throw std::invalid_argument("invalid shape list");
     std::vector<std::string> result;
@@ -76,42 +73,61 @@ std::vector<std::string> shapes_argument(String const& value) {
     return result;
 }
 
-List<ArgumentParser> parsers(Selection& selection) {
-    List<ArgumentParser> result;
-    result.append(make_valued_argument_parser(
-        "g","shapes","Comma-separated geometry names",
-        [&selection](String const& value)->VoidFunction {
-            auto parsed=shapes_argument(value);
-            return [&selection,parsed] { selection.shapes=parsed; };
-        }));
-    result.append(make_valued_argument_parser(
-        "n","samples","Odd number of timing samples (>=3)",
-        [&selection](String const& value)->VoidFunction {
-            unsigned parsed=unsigned_argument(value);
-            if(parsed<3u or parsed%2u==0u)
+// This component has no threading dependency. Keep its tiny CLI local,
+// while accepting --concurrency 0 for parity with the paving benchmarks.
+void print_usage(char const* program) {
+    std::cout<<"Usage: "<<program<<" [options]\\n"
+             <<"  -g, --shapes NAMES         Comma-separated shape list\\n"
+             <<"  -n, --samples N            Odd number of samples (>=3)\\n"
+             <<"  --min-sample-ms N          Calibration threshold in ms\\n"
+             <<"  --max-iterations N         Maximum calibrated repetitions\\n"
+             <<"  --concurrency 0            Sequential mode (only supported value)\\n"
+             <<"  --verify-only              Validate without timing\\n"
+             <<"  -h, --help                 Print this help\\n";
+}
+
+Bool parse_arguments(int argc,char const* argv[],Selection& selection) {
+    for(int i=1;i<argc;++i) {
+        std::string argument(argv[i]);
+        if(argument=="-h" or argument=="--help") {
+            print_usage(argv[0]);
+            return false;
+        }
+        if(argument=="--verify-only") {
+            selection.verify_only=true;
+            continue;
+        }
+        if(i+1>=argc) {
+            throw std::invalid_argument("missing value for "+argument);
+        }
+        std::string value(argv[++i]);
+        if(argument=="-g" or argument=="--shapes") {
+            selection.shapes=shapes_argument(value);
+        } else if(argument=="-n" or argument=="--samples") {
+            unsigned number=unsigned_argument(value);
+            if(number<3u or number%2u==0u)
                 throw std::invalid_argument("samples must be odd and >=3");
-            return [&selection,parsed] { selection.samples=parsed; };
-        }));
-    result.append(make_valued_argument_parser(
-        "","min-sample-ms","Minimum calibration duration (ms)",
-        [&selection](String const& value)->VoidFunction {
-            unsigned parsed=unsigned_argument(value);
-            if(parsed<1u or parsed>10000u)
+            selection.samples=number;
+        } else if(argument=="--min-sample-ms") {
+            unsigned number=unsigned_argument(value);
+            if(number==0u or number>10000u)
                 throw std::invalid_argument("min-sample-ms out of range");
-            return [&selection,parsed] { selection.min_sample_ms=parsed; };
-        }));
-    result.append(make_valued_argument_parser(
-        "","max-iterations","Maximum repetitions per timing sample",
-        [&selection](String const& value)->VoidFunction {
-            unsigned parsed=unsigned_argument(value);
-            if(parsed==0u)
+            selection.min_sample_ms=number;
+        } else if(argument=="--max-iterations") {
+            unsigned number=unsigned_argument(value);
+            if(number==0u)
                 throw std::invalid_argument("max-iterations must be positive");
-            return [&selection,parsed] { selection.max_iterations=parsed; };
-        }));
-    result.append(make_unvalued_argument_parser(
-        "","verify-only","Check deterministic outcomes without timing",
-        [&selection] { selection.verify_only=true; }));
-    return result;
+            selection.max_iterations=number;
+        } else if(argument=="--concurrency") {
+            if(value!="0") {
+                throw std::invalid_argument(
+                    "only --concurrency 0 is supported by this sequential benchmark");
+            }
+        } else {
+            throw std::invalid_argument("unknown argument: "+argument);
+        }
+    }
+    return true;
 }
 
 List<EffectiveConstraint> shape_constraints(std::string const& shape) {
@@ -476,16 +492,7 @@ int main(int argc,char const* argv[]) {
     try {
         Logger::instance().configuration().set_verbosity(1u);
         Selection selection;
-        ThreadingCommandLineInterface cli;
-        cli.add(CommandLineContribution(
-            "constraint-reduce-benchmark",parsers(selection)));
-        List<String> args;
-        for(int i=0;i<argc;++i) args.append(String(argv[i]));
-        if(not cli.acquire(args)) {
-            return std::find(args.begin(),args.end(),String("--help"))!=args.end()
-                or std::find(args.begin(),args.end(),String("-h"))!=args.end()
-                ?0:1;
-        }
+        if(not parse_arguments(argc,argv,selection)) return 0;
         std::vector<Datum> results;
         for(std::string const& shape:selection.shapes) {
             std::cout<<"Measuring "<<shape
