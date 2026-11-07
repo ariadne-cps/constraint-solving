@@ -297,7 +297,9 @@ void append_case(std::vector<Datum>& data,Selection const& selection,
     // Compare public hull function dispatch with precompiled procedures.
     // The production hull_reduce(function,...) compiles this vector
     // internally every time; caching here is only diagnostic.
-    Vector<ValidatedProcedure> compiled(problem.function);
+    Vector<ValidatedProcedure> compiled(
+        problem.function.result_size(),
+        [&](SizeType i) { return ValidatedProcedure(problem.function[i]); });
     std::vector<UpperBoxType> after_hull;
     after_hull.reserve(problem.codomains.size());
     SizeType full_empty=0u;
