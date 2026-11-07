@@ -64,10 +64,19 @@ setup_standalone_project_tests(
         "${PROJECT_SOURCE_DIR}/src"
 )
 
-# A transitive dependency already reserves the build/benchmarks binary
-# directory. Give this project's standalone benchmark source a distinct
-# binary directory to avoid colliding during superbuild configuration.
-add_subdirectory(benchmarks "${CMAKE_CURRENT_BINARY_DIR}/constraint-solving-benchmarks")
+# Reuse the benchmarks aggregator provided by dependencies, as in paving.
+# The diagnostic executable is opt-in and excluded from the library/test build.
+if(NOT TARGET benchmarks)
+    add_custom_target(benchmarks)
+endif()
+
+add_executable(benchmark_constraint_reduce
+    benchmarks/benchmark_constraint_reduce.cpp)
+target_link_libraries(benchmark_constraint_reduce
+    PRIVATE ariadne-constraint-solving constraint_solving)
+set_target_properties(benchmark_constraint_reduce PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/benchmarks")
+add_dependencies(benchmarks benchmark_constraint_reduce)
 
 if(BUILD_PYTHON_BINDINGS)
     add_subdirectory(python)
