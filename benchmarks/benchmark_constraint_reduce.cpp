@@ -294,12 +294,14 @@ void append_case(std::vector<Datum>& data,Selection const& selection,
                  std::string const& shape) {
     SolverProblem problem=make_problem(shape);
     ConstraintSolver solver;
-    // Compare public hull function dispatch with precompiled procedures.
-    // The production hull_reduce(function,...) compiles this vector
-    // internally every time; caching here is only diagnostic.
-    Vector<ValidatedProcedure> compiled(
-        problem.function.result_size(),
-        [&](SizeType i) { return ValidatedProcedure(problem.function[i]); });
+    // The library Vector<ValidatedProcedure> uses UniformArray, which
+    // requires element characteristics unavailable for Procedure. Cache
+    // procedures in std::vector and compare identical scalar hull passes.
+    std::vector<ValidatedProcedure> compiled;
+    compiled.reserve(problem.function.result_size());
+    for(SizeType i=0u;i<problem.function.result_size();++i) {
+        compiled.emplace_back(problem.function[i]);
+    }
     std::vector<UpperBoxType> after_hull;
     after_hull.reserve(problem.codomains.size());
     SizeType full_empty=0u;
@@ -317,13 +319,20 @@ void append_case(std::vector<Datum>& data,Selection const& selection,
 
         UpperBoxType ordinary=problem.initial_domain;
         solver.hull_reduce(ordinary,problem.function,target);
-        UpperBoxType cached=problem.initial_domain;
-        solver.hull_reduce(cached,compiled,target);
-        if(not same(ordinary,cached))
-            throw std::runtime_error(
-                "cached and ordinary hull reduction disagree");
         hull_empty+=static_cast<SizeType>(definitely(ordinary.is_empty()));
         after_hull.push_back(std::move(ordinary));
+
+        // Both scalar paths use the same sequence and stop condition.
+        UpperBoxType scalar_fresh=problem.initial_domain;
+        UpperBoxType scalar_cached=problem.initial_domain;
+        for(SizeType i=0u;i<target.size();++i) {
+            solver.hull_reduce(scalar_fresh,problem.function[i],target[i]);
+            solver.hull_reduce(scalar_cached,compiled[i],target[i]);
+            if(not same(scalar_fresh,scalar_cached))
+                throw std::runtime_error(
+                    "fresh and cached scalar hull steps disagree");
+            if(definitely(scalar_fresh.is_empty())) break;
+        }
     }
     // Precomputed post-hull domains isolate a single subsequent box sweep.
     // The full reduce() may execute more than one hull/box round.
@@ -387,18 +396,35 @@ void append_case(std::vector<Datum>& data,Selection const& selection,
         }
         return empty;
     };
-    auto hull_compiled=[&] {
+    auto hull_scalar_fresh=[&] {
         SizeType empty=0u;
         for(ExactBoxType const& target:problem.codomains) {
             UpperBoxType domain=problem.initial_domain;
-            solver.hull_reduce(domain,compiled,target);
+            for(SizeType i=0u;i<target.size();++i) {
+                solver.hull_reduce(domain,problem.function[i],target[i]);
+                if(definitely(domain.is_empty())) break;
+            }
             empty+=static_cast<SizeType>(definitely(domain.is_empty()));
             keep_alive(domain);
         }
         return empty;
     };
+    auto hull_scalar_cached=[&] {
+        SizeType empty=0u;
+        for(ExactBoxType const& target:problem.codomains) {
+            UpperBoxType domain=problem.initial_domain;
+            for(SizeType i=0u;i<target.size();++i) {
+                solver.hull_reduce(domain,compiled[i],target[i]);
+                if(definitely(domain.is_empty())) break;
+            }
+            empty+=static_cast<SizeType>(definitely(domain.is_empty()));
+            keep_alive(domain);
+        }
+        return empty;
+    };
+    SizeType scalar_empty=hull_scalar_fresh();
     if(full()!=full_empty or hull_fresh()!=hull_empty
-       or hull_compiled()!=hull_empty or box_sweep()!=box_empty)
+       or hull_scalar_cached()!=scalar_empty or box_sweep()!=box_empty)
         throw std::runtime_error("reduction checksum mismatch");
 
     auto record=[&](char const* operation,auto&& workload) {
@@ -408,8 +434,9 @@ void append_case(std::vector<Datum>& data,Selection const& selection,
                         problem.constraints_count,timing.iterations});
     };
     record("reduce_full",full);
-    record("hull_fresh",hull_fresh);
-    record("hull_compiled",hull_compiled);
+    record("hull_vector_fresh",hull_fresh);
+    record("hull_scalar_fresh",hull_scalar_fresh);
+    record("hull_scalar_cached",hull_scalar_cached);
     record("box_sweep_post_hull",box_sweep);
 }
 
@@ -421,8 +448,10 @@ void report(std::vector<Datum> const& data,Selection const& selection) {
              <<"Prepared input functions and codomains are outside"
                 " all timed loops. The box sample is NOT paving's adaptive"
                 " collection.\n"
-             <<"Measured workloads overlap: full reduce, fresh hull,"
-                " precompiled hull and one box sweep after hull.\n"
+             <<"Measured workloads overlap: full reduce, vector hull,"
+                " scalar hull (fresh/cached) and one post-hull box sweep.\n"
+             <<"Fresh/cached scalar hulls have matching steps; they need"
+                " not match the full-vector hull contractor.\n"
              <<"Independent within-case medians. DO NOT add/subtract"
                 " phase medians to claim exact attribution.\n"
              <<"samples="<<selection.samples
@@ -462,7 +491,8 @@ void report(std::vector<Datum> const& data,Selection const& selection) {
              <<std::setw(17)<<"Geomean"<<"\n"
              <<std::string(67,'-')<<"\n";
     for(char const* operation:{
-            "hull_fresh","hull_compiled","box_sweep_post_hull"}) {
+            "hull_vector_fresh","hull_scalar_fresh",
+            "hull_scalar_cached","box_sweep_post_hull"}) {
         SizeType cases=0u;
         double total_log=0.0;
         for(Datum const& row:data) {
