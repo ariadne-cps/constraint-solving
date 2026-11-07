@@ -76,14 +76,14 @@ std::vector<std::string> shapes_argument(std::string const& input) {
 // This component has no threading dependency. Keep its tiny CLI local,
 // while accepting --concurrency 0 for parity with the paving benchmarks.
 void print_usage(char const* program) {
-    std::cout<<"Usage: "<<program<<" [options]\\n"
-             <<"  -g, --shapes NAMES         Comma-separated shape list\\n"
-             <<"  -n, --samples N            Odd number of samples (>=3)\\n"
-             <<"  --min-sample-ms N          Calibration threshold in ms\\n"
-             <<"  --max-iterations N         Maximum calibrated repetitions\\n"
-             <<"  --concurrency 0            Sequential mode (only supported value)\\n"
-             <<"  --verify-only              Validate without timing\\n"
-             <<"  -h, --help                 Print this help\\n";
+    std::cout<<"Usage: "<<program<<" [options]\n"
+             <<"  -g, --shapes NAMES         Comma-separated shape list\n"
+             <<"  -n, --samples N            Odd number of samples (>=3)\n"
+             <<"  --min-sample-ms N          Calibration threshold in ms\n"
+             <<"  --max-iterations N         Maximum calibrated repetitions\n"
+             <<"  --concurrency 0            Sequential mode (only supported value)\n"
+             <<"  --verify-only              Validate without timing\n"
+             <<"  -h, --help                 Print this help\n";
 }
 
 Bool parse_arguments(int argc,char const* argv[],Selection& selection) {
