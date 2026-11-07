@@ -16,11 +16,14 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <iterator>
 #include <limits>
 #include <stdexcept>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -41,6 +44,7 @@ struct Selection {
     unsigned min_sample_ms=12u;
     unsigned max_iterations=256u;
     Bool verify_only=false;
+    std::string trace_prefix;
 };
 
 unsigned unsigned_argument(std::string const& text) {
@@ -82,6 +86,7 @@ void print_usage(char const* program) {
              <<"  --min-sample-ms N          Calibration threshold in ms\n"
              <<"  --max-iterations N         Maximum calibrated repetitions\n"
              <<"  --concurrency 0            Sequential mode (only supported value)\n"
+             <<"  --trace-prefix PREFIX      Replay exported paving d4/f3 boxes\n"
              <<"  --verify-only              Validate without timing\n"
              <<"  -h, --help                 Print this help\n";
 }
@@ -118,6 +123,10 @@ Bool parse_arguments(int argc,char const* argv[],Selection& selection) {
             if(number==0u)
                 throw std::invalid_argument("max-iterations must be positive");
             selection.max_iterations=number;
+        } else if(argument=="--trace-prefix") {
+            if(value.empty())
+                throw std::invalid_argument("trace prefix must not be empty");
+            selection.trace_prefix=value;
         } else if(argument=="--concurrency") {
             if(value!="0") {
                 throw std::invalid_argument(
@@ -230,6 +239,189 @@ SolverProblem make_problem(std::string const& shape) {
         {0.0_x,1.0_x},{0.0_x,1.0_x}});
     return {std::move(function),std::move(initial),
             std::move(codomains),constraints.size()};
+}
+
+
+struct TraceRecord {
+    ExactBoxType box;
+    Bool separated;
+};
+
+std::vector<TraceRecord> read_adaptive_trace(
+        std::string const& prefix,std::string const& shape) {
+    std::string path=prefix+"-"+shape+"-d4-f3.trace";
+    std::ifstream in(path);
+    if(not in) throw std::runtime_error("cannot open paving trace: "+path);
+    std::string header,recorded_shape;
+    unsigned dimension=0u,fineness=0u;
+    SizeType count=0u;
+    if(not (in>>header>>recorded_shape>>dimension>>fineness>>count)
+       or header!="ARIADNE_PAVING_SOLVER_TRACE_V1"
+       or recorded_shape!=shape or dimension!=4u or fineness!=3u
+       or count==0u or count>1000000u) {
+        throw std::runtime_error("invalid paving trace header: "+path);
+    }
+    std::vector<TraceRecord> result;
+    result.reserve(count);
+    auto parse_number=[](std::string const& token)->double {
+        if(token.empty()) throw std::runtime_error("empty trace endpoint");
+        char* end=nullptr;
+        double value=std::strtod(token.c_str(),&end);
+        if(end==token.c_str() or *end!='\0' or not std::isfinite(value))
+            throw std::runtime_error("invalid trace endpoint: "+token);
+        return value;
+    };
+    // Parse strings with strtod; standard iostream floating input does not
+    // reliably accept C99 hexadecimal-float notation across platforms.
+    for(SizeType i=0u;i<count;++i) {
+        unsigned separated=0u;
+        if(not (in>>separated) or separated>1u)
+            throw std::runtime_error("invalid trace separation bit at query "
+                                    +std::to_string(i));
+        ExactBoxType box(4u);
+        for(SizeType j=0u;j<4u;++j) {
+            std::string lower,upper;
+            if(not (in>>lower>>upper))
+                throw std::runtime_error("truncated paving trace");
+            double l=parse_number(lower);
+            double u=parse_number(upper);
+            if(l>u) throw std::runtime_error("reversed trace interval");
+            box[j]=ExactIntervalType(ExactDouble(l),ExactDouble(u));
+        }
+        result.push_back({std::move(box),separated!=0u});
+    }
+    std::string trailing;
+    if(in>>trailing)
+        throw std::runtime_error("unexpected trailing trace payload");
+    return result;
+}
+
+struct ReduceTraceStatistics {
+    SizeType queries=0u;
+    SizeType proven_empty=0u;
+    SizeType rounds=0u;
+    SizeType hull_calls=0u;
+    SizeType box_calls=0u;
+    SizeType stopped_empty_hull=0u;
+    SizeType stopped_empty_box=0u;
+    SizeType stopped_threshold=0u;
+    double hull_seconds=0.0;
+    double box_seconds=0.0;
+    double total_seconds=0.0;
+};
+
+void traced_reduce(ConstraintSolver const& solver,UpperBoxType& domain,
+                   ValidatedVectorMultivariateFunction const& function,
+                   ExactBoxType const& codomain,ReduceTraceStatistics& stats) {
+    using Clock=std::chrono::steady_clock;
+    auto elapsed=[](Clock::time_point started)->double {
+        return std::chrono::duration<double>(Clock::now()-started).count();
+    };
+    ++stats.queries;
+    auto start=Clock::now();
+    const ExactDouble MINIMUM_REDUCTION=0.75_x;
+    if(definitely(domain.is_empty())) {
+        ++stats.proven_empty;
+        stats.total_seconds+=elapsed(start);
+        return;
+    }
+    FloatDPUpperBound magnitude={0u,dp};
+    for(SizeType j=0u;j<domain.size();++j)
+        magnitude+=domain[j].width();
+    FloatDPUpperBound previous=magnitude;
+    do {
+        ++stats.rounds;
+        auto hstart=Clock::now();
+        ++stats.hull_calls;
+        solver.hull_reduce(domain,function,codomain);
+        stats.hull_seconds+=elapsed(hstart);
+        if(definitely(domain.is_empty())) {
+            ++stats.stopped_empty_hull;
+            ++stats.proven_empty;
+            stats.total_seconds+=elapsed(start);
+            return;
+        }
+        for(SizeType i=0u;i<codomain.size();++i) {
+            for(SizeType j=0u;j<domain.size();++j) {
+                auto bstart=Clock::now();
+                ++stats.box_calls;
+                solver.box_reduce(domain,function[i],codomain[i],j);
+                stats.box_seconds+=elapsed(bstart);
+                if(definitely(domain.is_empty())) {
+                    ++stats.stopped_empty_box;
+                    ++stats.proven_empty;
+                    stats.total_seconds+=elapsed(start);
+                    return;
+                }
+            }
+        }
+        previous=magnitude;
+        magnitude=0u;
+        for(SizeType j=0u;j<domain.size();++j)
+            magnitude+=domain[j].width();
+    } while(magnitude.raw()
+            < mul(near,previous.raw(),FloatDP(MINIMUM_REDUCTION,dp)));
+    ++stats.stopped_threshold;
+    stats.total_seconds+=elapsed(start);
+}
+
+void profile_adaptive_trace(std::string const& prefix,
+                            std::string const& shape,Bool verify_only) {
+    SolverProblem problem=make_problem(shape);
+    std::vector<TraceRecord> records=read_adaptive_trace(prefix,shape);
+    ConstraintSolver solver;
+    ReduceTraceStatistics stats;
+    SizeType mismatch=0u;
+    auto sweep_start=std::chrono::steady_clock::now();
+    for(TraceRecord const& entry:records) {
+        // Reuse exactly the geometry and constraints from this shape; only
+        // the query-box portion varies with the exported adaptive trace.
+        ExactBoxType codomain=problem.codomains.front();
+        for(SizeType i=0u;i<4u;++i)
+            codomain[i]=entry.box[i];
+        UpperBoxType original=problem.initial_domain;
+        solver.reduce(original,problem.function,codomain);
+        UpperBoxType instrumented=problem.initial_domain;
+        traced_reduce(solver,instrumented,problem.function,codomain,stats);
+        if(not same(original,instrumented))
+            throw std::runtime_error(
+                "instrumented reduce changed contracted domain for "+shape);
+        Bool empty=definitely(original.is_empty());
+        if(empty!=entry.separated) ++mismatch;
+    }
+    double sweep_ms=1000.0*std::chrono::duration<double>(
+        std::chrono::steady_clock::now()-sweep_start).count();
+    if(mismatch!=0u) throw std::runtime_error(
+        "solver replay disagrees with paving separation trace: "+shape+
+        " mismatches="+std::to_string(mismatch));
+    if(stats.queries!=records.size()
+       or stats.stopped_empty_hull+stats.stopped_empty_box+
+          stats.stopped_threshold!=stats.queries)
+        throw std::runtime_error("inconsistent solver trace counters");
+    std::cout<<"TRACE_VERIFIED shape="<<shape
+             <<" d=4 f=3 queries="<<stats.queries
+             <<" definitely_separated="<<stats.proven_empty
+             <<" rounds="<<stats.rounds
+             <<" hull_calls="<<stats.hull_calls
+             <<" box_calls="<<stats.box_calls
+             <<" stop_hull="<<stats.stopped_empty_hull
+             <<" stop_box="<<stats.stopped_empty_box
+             <<" stop_threshold="<<stats.stopped_threshold<<"\n";
+    if(verify_only) return;
+    std::cout<<"SOLVER_TRACE shape="<<shape
+             <<" d=4 f=3"
+             <<" trace_queries="<<stats.queries
+             <<" instrumented_total_ms="<<std::fixed<<std::setprecision(4)
+                 <<1000.0*stats.total_seconds
+             <<" hull_ms="<<1000.0*stats.hull_seconds
+             <<" box_ms="<<1000.0*stats.box_seconds
+             <<" other_ms="<<1000.0*(
+                 stats.total_seconds-stats.hull_seconds-stats.box_seconds)
+             <<" paired_replay_wall_ms="<<sweep_ms
+             <<"\n";
+    std::cout<<"SOLVER_TRACE measures an instrumented diagnostic replay and"
+                " a separate uninstrumented oracle call per input;"
+                " it is NOT a direct timing of paving::separated().\n";
 }
 
 template<class T>
@@ -525,6 +717,13 @@ int main(int argc,char const* argv[]) {
         Logger::instance().configuration().set_verbosity(1u);
         Selection selection;
         if(not parse_arguments(argc,argv,selection)) return 0;
+        if(not selection.trace_prefix.empty()) {
+            for(std::string const& shape:selection.shapes) {
+                profile_adaptive_trace(
+                    selection.trace_prefix,shape,selection.verify_only);
+            }
+            return 0;
+        }
         std::vector<Datum> results;
         for(std::string const& shape:selection.shapes) {
             std::cout<<"Measuring "<<shape
