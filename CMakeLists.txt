@@ -64,7 +64,10 @@ setup_standalone_project_tests(
         "${PROJECT_SOURCE_DIR}/src"
 )
 
-add_subdirectory(benchmarks)
+# A transitive dependency already reserves the build/benchmarks binary
+# directory. Give this project's standalone benchmark source a distinct
+# binary directory to avoid colliding during superbuild configuration.
+add_subdirectory(benchmarks "${CMAKE_CURRENT_BINARY_DIR}/constraint-solving-benchmarks")
 
 if(BUILD_PYTHON_BINDINGS)
     add_subdirectory(python)
