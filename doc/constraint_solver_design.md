@@ -732,13 +732,76 @@ cmake --build build-release --target benchmark_constraint_reduce
   --compare-adaptive-cache --samples 7 --concurrency 0
 ```
 
-**Scope:** the cache is an implementation optimization of the
-*existing diagnostic adaptive algorithm*, not of the current
-eight-slice production `box_reduce()`. Even if it is faster
-than uncached dyadic traversal, the previously measured weaker
-contractions and candidate-only empty cases remain a barrier
-to production promotion. Compilation and operator measurements
-for this new mode are pending.
+**Scope and decision:** the cache is an implementation optimization
+of the *diagnostic dyadic algorithm*, not of production's
+eight-slice `box_reduce()`. The operator has now verified and
+timed the cached and uncached versions; their final boxes match
+exactly on all 9,167 adaptive queries. The extra cost of dyadic
+subdivision, weaker contractions and 28 candidate-only empty
+results remain; **do not promote** this cache or the dyadic
+algorithm to production. The current production eight-slice
+scan already avoids rescanning the examined lower slices from
+its upper pass, so these dyadic hit rates cannot simply be
+transferred to production.
+
+#### P5 cached dyadic replay results — macOS Release, 2026-11-08
+
+The operator ran `--compare-adaptive-cache` with both
+`--verify-only` and seven-sample timed sweeps, using the five
+d4/f3 adaptive traces at `$HOME/Downloads/traces/outer`.
+Every mode passed **exact final-box equality between cached
+and uncached dyadic contractors** on all 9,167 queries, with
+identical cell visits, calls, rounds, contractor outcomes,
+budget stops, and separation decisions. The production P1
+baseline was also checked against the frozen old full scan
+and the paving separation trace.
+
+| Shape | Budget-8 hits / visits | Budget-8 cache speedup | Budget-8 P1-to-cache speedup | Resolution hits / visits | Resolution cache speedup | Resolution P1-to-cache speedup |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| aligned-box | 0 / 0 | 1.027x | 1.002x | 0 / 0 | 1.026x | 1.081x |
+| rotated-box | 19268 / 141500 | 1.074x | 0.797x | 25428 / 326468 | 1.045x | 0.466x |
+| aligned-ellipsoid | 32864 / 147855 | 1.180x | 0.857x | 39040 / 191479 | 1.208x | 0.825x |
+| rotated-ellipsoid | 15988 / 85208 | 1.168x | **1.877x** | 34190 / 448994 | 1.073x | 0.387x |
+| ball | 39758 / 181704 | 1.179x | 0.842x | 47486 / 243708 | 1.196x | 0.790x |
+| **Totals / geometric mean speedups** | **107878 / 556267** | **1.124x** | **1.016x** | **146144 / 1210649** | **1.107x** | **0.662x** |
+
+Budget-8 memoization avoids **107,878 (19.39%)** repeated
+validated function evaluations, reducing 556,267 to
+448,389, and accelerates the original adaptive prototype
+by 1.124x geometric mean. Resolution memoization avoids
+**146,144 (12.07%)**, reducing 1,210,649 to 1,064,505
+evaluations, for a 1.107x cached-vs-uncached speedup.
+The medians include cache allocation and linear lookup costs.
+The aligned-box measurements have **zero box work** and are
+therefore just measurement variability, not cache benefits.
+
+The budget-8 cached variant has a five-shape geomean
+**1.016x** relative to P1, but this number is misleading
+as a promotion criterion: four shapes are slower or
+approximately equal, while the sole substantial win,
+`rotated-ellipsoid` (**1.877x**), is still weaker on
+324/1055 final boxes and differs in another 60.
+The resolution variant remains substantially slower
+than P1 (geomean 0.662x), and its 28 additional
+`rotated-ellipsoid` empty results remain unverified
+by an independent complete feasibility argument.
+
+The production benchmark and diagnostic algorithms have
+different contraction behavior. The equality achieved by
+cached versus uncached dyadic traversal is a meaningful
+**implementation-level isolation test**; it does not confer
+equivalence between dyadic traversal and production.
+Do not infer a statistically robust few-percent gain from
+the fixed-order unpaired medians, especially where there
+is no contractor work.
+
+**Decision:** retain the memoization diagnostic for reuse
+studies but do not insert it into production. Before any
+further shaving redesign, independently audit the dyadic
+interval partition/exclusion proof (especially the 28
+additional empty results), and seek a strategy that
+minimizes evaluation cost **without sacrificing contraction
+strength** on nonlinear inputs.
 
 Do **not** promote an adaptive variant merely because its
 loop is cheaper. Its contraction strength, certified
@@ -938,6 +1001,8 @@ can be added for correctness-only replay.
 | 2026-11-08 | Completed P5 seven-sample adaptive replay timings. Geomean P1-relative speedup: budget-8 0.909x, depth-8/cap-64 0.596x. Rotated-ellipsoid budget-8 alone achieved 1.621x but weakened 324/1055 boxes. | Reject both adaptive variants for production; retain diagnostic and investigate duplicated evaluations and contraction strength separately |
 
 | 2026-11-08 | Added per-box-call dyadic exclusion-decision cache with identical visit order and visit budget; opt-in benchmark reports verified domain equivalence to uncached adaptive shaving, cache hits, evaluation reduction and timed comparison including cache overhead. | Prototype committed; build and operator results pending |
+
+| 2026-11-08 | Adaptive dyadic per-box cache validated identical domains versus uncached on all 9,167 queries. Cache saves 107,878 evaluations (19.39%) for budget-8 and 146,144 (12.07%) for resolution; cache-only geomeans 1.124x and 1.107x. Relative to production: 1.016x and 0.662x, with the only major budget win on rotated-ellipsoid still weakening 324/1055 boxes. | Retain benchmark diagnostics, no production change; prioritize independent empty-proof audit and strength-preserving shaving |
 
 ### Update protocol
 
