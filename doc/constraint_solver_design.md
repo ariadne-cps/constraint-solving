@@ -1945,3 +1945,56 @@ the **status and risks** of the affected proposal.
 Commit these documentation changes alongside the relevant
 benchmark/solver changes, rather than leaving design history
 in a chat or solely in `paving/doc`.
+
+### P8 — Explicit caller-owned prepared vector contractor
+
+**Implementation (2026-11-08).** The public
+PreparedConstraintSolverFunction owns immutable validated-vector
+function data and a precompiled specialized vector hull procedure
+through shared const implementation data. Its constructor snapshots
+the function, rather than retaining a borrowed pointer.
+ConstraintSolver::reduce(domain,prepared,codomain) is a new
+nonvirtual overload; the original virtual reduce signature remains
+unchanged. Both methods use exactly one private
+_reduce_with_hull implementation containing the P6
+hull / certified-containment guard / box shaving / 0.75 stop
+cycle. Each call has independent domain and proof cache, and
+there are no global or thread-local mutable caches.
+
+The ordinary overload continues compiling a procedure once
+per query; the prepared overload compiles once per explicit
+context lifetime. Keeping all contractor logic in one
+implementation removes the duplicated benchmark-only loop
+that P7 had used to estimate cross-query reuse.
+
+**Tests:** test_prepared_reduce_matches_production checks
+alternating codomains, exactly identical contracted boxes,
+empty/nonempty outcomes, copied prepared handles, and an
+owned function snapshot after its source function has gone
+out of scope. The new solver commit passed all five
+Ubuntu/macOS/Windows/Sanitizers/Coverage workflows.
+
+**Cross-module implementation:** set introduces an optional
+PreparedConstrainedImageSetSeparation snapshot containing
+immutable joined function/constraint bounds, initial
+domain, and this prepared contractor. The ordinary
+ConstrainedImageSet::separated remains unchanged.
+Effective-set BinaryTree/ROBDD outer-approximation
+operations can create one local snapshot per call for
+concrete ConstrainedImageSet objects only. Other set
+types and polymorphic overrides retain original dispatch.
+The benchmark in paving now uses the actual prepared
+set/solver API; it no longer copies the P6 contractor loop.
+
+**Limitations and release gate:** the earlier 13.78%
+five-shape predicate-replay speedup was obtained with a
+diagnostic implementation, not this newly integrated
+production path. The latter still requires fresh
+whole-geometry verification, new calibrated timings, and
+cross-platform set/paving CI. The set snapshot and prepared
+procedure hold no mutable per-query scratch in their API,
+but simultaneous use of the same handle by multiple
+threads still deserves explicit stress testing.
+Do not treat correctness on 9,167 fixed trace boxes
+as a general equivalence theorem or assume the
+predicate-only speedup is a whole-paving speedup.
