@@ -695,11 +695,11 @@ correctness tests before changing the contractor.
 The original adaptive prototype traverses dyadic cells separately
 from the lower and upper boundaries, revisiting the root and
 sometimes other dyadic nodes. Its new opt-in mode,
-\`--compare-adaptive-cache\`, records the identity of a node
-(\`depth,index\`) and its validated exclusion decision within
+`--compare-adaptive-cache`, records the identity of a node
+(`depth,index`) and its validated exclusion decision within
 a **single coordinate contractor invocation**. On a repeated
 visit, the contractor reuses that decision without repeating
-\`apply(function,slice)\`. It must never reuse a proof after
+`apply(function,slice)`. It must never reuse a proof after
 the domain or another coordinate has changed.
 
 The evaluation **budget is counted in visited cells, not
@@ -712,29 +712,29 @@ budget/depth-stop counters. It also checks the untouched
 production solver against the frozen legacy reference and
 the original paving separation bits.
 
-For each of \`budget\` (8 visits) and \`resolution\` (64 visits)
-the benchmark prints \`ADAPTIVE_CACHE_VERIFIED\` with visits,
+For each of `budget` (8 visits) and `resolution` (64 visits)
+the benchmark prints `ADAPTIVE_CACHE_VERIFIED` with visits,
 actual function evaluations, cache hits, and separation counts;
-and \`ADAPTIVE_CACHE_COMPARE\` with seven-sample median
+and `ADAPTIVE_CACHE_COMPARE` with seven-sample median
 times for production, uncached dyadic traversal and cached
 dyadic traversal. The instrumentation uses a per-call vector
 of memoized decisions, so lookup and allocation overhead are
 included in the real timing; a smaller evaluation count does
 not imply a wall-time improvement.
 
-\`\`\`sh
+```sh
 cmake --build build-release --target benchmark_constraint_reduce
-./build-release/benchmarks/benchmark_constraint_reduce \\
-  --trace-prefix "$HOME/Downloads/traces/outer" \\
+./build-release/benchmarks/benchmark_constraint_reduce \
+  --trace-prefix "$HOME/Downloads/traces/outer" \
   --compare-adaptive-cache --verify-only --concurrency 0
-./build-release/benchmarks/benchmark_constraint_reduce \\
-  --trace-prefix "$HOME/Downloads/traces/outer" \\
+./build-release/benchmarks/benchmark_constraint_reduce \
+  --trace-prefix "$HOME/Downloads/traces/outer" \
   --compare-adaptive-cache --samples 7 --concurrency 0
-\`\`\`
+```
 
 **Scope:** the cache is an implementation optimization of the
 *existing diagnostic adaptive algorithm*, not of the current
-eight-slice production \`box_reduce()\`. Even if it is faster
+eight-slice production `box_reduce()`. Even if it is faster
 than uncached dyadic traversal, the previously measured weaker
 contractions and candidate-only empty cases remain a barrier
 to production promotion. Compilation and operator measurements
