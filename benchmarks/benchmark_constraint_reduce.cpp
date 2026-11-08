@@ -44,6 +44,7 @@ struct Selection {
     unsigned min_sample_ms=12u;
     unsigned max_iterations=256u;
     Bool verify_only=false;
+    Bool compare_contained_skip=false;
     std::string trace_prefix;
 };
 
@@ -87,6 +88,7 @@ void print_usage(char const* program) {
              <<"  --max-iterations N         Maximum calibrated repetitions\n"
              <<"  --concurrency 0            Sequential mode (only supported value)\n"
              <<"  --trace-prefix PREFIX      Replay exported paving d4/f3 boxes\n"
+             <<"  --compare-contained-skip   Test certified-satisfied constraints\n"
              <<"  --verify-only              Validate without timing\n"
              <<"  -h, --help                 Print this help\n";
 }
@@ -100,6 +102,10 @@ Bool parse_arguments(int argc,char const* argv[],Selection& selection) {
         }
         if(argument=="--verify-only") {
             selection.verify_only=true;
+            continue;
+        }
+        if(argument=="--compare-contained-skip") {
+            selection.compare_contained_skip=true;
             continue;
         }
         if(i+1>=argc) {
@@ -585,6 +591,68 @@ void profile_adaptive_trace(std::string const& prefix,
     }
 }
 
+// Experimental contractor scheduling. A certified image enclosure
+// included in the constraint bounds proves that constraint everywhere
+// on the current domain. Since reduce only contracts its domain, the
+// certificate stays valid for the rest of this query. Neither a static
+// shape assumption nor a nonvalidated floating tolerance is used.
+struct ContainedSkipStatistics {
+    SizeType tests=0u;
+    SizeType certificates=0u;
+    SizeType reused_certificates=0u;
+    SizeType saved_box_calls=0u;
+    SizeType executed_box_calls=0u;
+};
+
+void reduce_contained_skip(ConstraintSolver const& solver,
+                           UpperBoxType& domain,
+                           ValidatedVectorMultivariateFunction const& function,
+                           ExactBoxType const& codomain,
+                           ContainedSkipStatistics* statistics=nullptr) {
+    const ExactDouble MINIMUM_REDUCTION=0.75_x;
+    if(definitely(domain.is_empty())) return;
+
+    std::vector<Bool> proved(codomain.size(),false);
+    FloatDPUpperBound magnitude={0u,dp};
+    for(SizeType j=0u;j<domain.size();++j)
+        magnitude+=domain[j].width();
+    FloatDPUpperBound previous=magnitude;
+
+    do {
+        solver.hull_reduce(domain,function,codomain);
+        if(definitely(domain.is_empty())) return;
+
+        for(SizeType i=0u;i<codomain.size();++i) {
+            if(proved[i]) {
+                if(statistics) {
+                    ++statistics->reused_certificates;
+                    statistics->saved_box_calls+=domain.size();
+                }
+                continue;
+            }
+            if(statistics) ++statistics->tests;
+            if(definitely(subset(apply(function[i],domain),codomain[i]))) {
+                proved[i]=true;
+                if(statistics) {
+                    ++statistics->certificates;
+                    statistics->saved_box_calls+=domain.size();
+                }
+                continue;
+            }
+            for(SizeType j=0u;j<domain.size();++j) {
+                if(statistics) ++statistics->executed_box_calls;
+                solver.box_reduce(domain,function[i],codomain[i],j);
+                if(definitely(domain.is_empty())) return;
+            }
+        }
+        previous=magnitude;
+        magnitude=0u;
+        for(SizeType j=0u;j<domain.size();++j)
+            magnitude+=domain[j].width();
+    } while(magnitude.raw()
+            < mul(near,previous.raw(),FloatDP(MINIMUM_REDUCTION,dp)));
+}
+
 template<class T>
 void keep_alive(T const& value) {
 #if defined(__GNUC__) || defined(__clang__)
@@ -632,6 +700,98 @@ Timing median_ms(Work&& work,Selection const& selection) {
     }
     std::sort(samples.begin(),samples.end());
     return {samples[selection.samples/2u],iterations};
+}
+
+// Same immutable adaptive query sequence and contract for both variants.
+// Preparation and correctness checks are deliberately outside timed loops.
+void compare_contained_skip(Selection const& selection,
+                            std::string const& shape) {
+    using Clock=std::chrono::steady_clock;
+    SolverProblem problem=make_problem(shape);
+    std::vector<TraceRecord> const trace=
+        read_adaptive_trace(selection.trace_prefix,shape);
+    std::vector<ExactBoxType> targets;
+    targets.reserve(trace.size());
+    for(TraceRecord const& entry:trace) {
+        ExactBoxType codomain=problem.codomains.front();
+        for(SizeType j=0u;j<4u;++j) codomain[j]=entry.box[j];
+        targets.push_back(std::move(codomain));
+    }
+    ConstraintSolver solver;
+    ContainedSkipStatistics counters;
+    SizeType oracle_empty=0u;
+    for(SizeType q=0u;q<targets.size();++q) {
+        UpperBoxType baseline=problem.initial_domain;
+        solver.reduce(baseline,problem.function,targets[q]);
+        UpperBoxType candidate=problem.initial_domain;
+        reduce_contained_skip(
+            solver,candidate,problem.function,targets[q],&counters);
+        if(not same(baseline,candidate)) {
+            throw std::runtime_error(
+                "certified containment pruning changed the contracted domain"
+                " shape="+shape+" query="+std::to_string(q));
+        }
+        Bool empty=definitely(baseline.is_empty());
+        if(empty!=trace[q].separated) {
+            throw std::runtime_error(
+                "baseline separation changed relative to paving trace"
+                " shape="+shape+" query="+std::to_string(q));
+        }
+        oracle_empty+=static_cast<SizeType>(empty);
+    }
+    std::cout<<"CONTAINED_SKIP_VERIFIED shape="<<shape
+             <<" d=4 f=3 queries="<<targets.size()
+             <<" separated="<<oracle_empty
+             <<" guard_tests="<<counters.tests
+             <<" guard_proofs="<<counters.certificates
+             <<" reused_proofs="<<counters.reused_certificates
+             <<" saved_box_calls="<<counters.saved_box_calls
+             <<" executed_box_calls="<<counters.executed_box_calls
+             <<"\n";
+
+    if(selection.verify_only) return;
+    auto original=[&] {
+        SizeType checksum=0u;
+        for(ExactBoxType const& target:targets) {
+            UpperBoxType domain=problem.initial_domain;
+            solver.reduce(domain,problem.function,target);
+            checksum+=static_cast<SizeType>(definitely(domain.is_empty()));
+            keep_alive(domain);
+        }
+        return checksum;
+    };
+    auto optimized=[&] {
+        SizeType checksum=0u;
+        for(ExactBoxType const& target:targets) {
+            UpperBoxType domain=problem.initial_domain;
+            reduce_contained_skip(
+                solver,domain,problem.function,target);
+            checksum+=static_cast<SizeType>(definitely(domain.is_empty()));
+            keep_alive(domain);
+        }
+        return checksum;
+    };
+    if(original()!=oracle_empty or optimized()!=oracle_empty)
+        throw std::runtime_error("contained skip sweep checksum mismatch");
+    Timing original_time=median_ms(original,selection);
+    Timing optimized_time=median_ms(optimized,selection);
+    double ratio=original_time.milliseconds/optimized_time.milliseconds;
+    if(not std::isfinite(ratio) or ratio<=0.0)
+        throw std::runtime_error("invalid contained skip speedup");
+    std::cout<<"CONTAINED_SKIP_COMPARE shape="<<shape
+             <<" d=4 f=3 queries="<<targets.size()
+             <<" baseline_median_ms="<<std::fixed<<std::setprecision(5)
+                <<original_time.milliseconds
+             <<" guarded_median_ms="<<optimized_time.milliseconds
+             <<" speedup="<<std::setprecision(3)<<ratio
+             <<" baseline_iters="<<original_time.iterations
+             <<" guarded_iters="<<optimized_time.iterations
+             <<" samples="<<selection.samples
+             <<" min_sample_ms="<<selection.min_sample_ms
+             <<"\n";
+    std::cout<<"CONTAINED_SKIP_COMPARE uses independent calibrated medians"
+                " and requires exact final-domain and separation equality"
+                " for every adaptive query. No production solver changed.\n";
 }
 
 struct Datum {
@@ -880,11 +1040,18 @@ int main(int argc,char const* argv[]) {
         if(not parse_arguments(argc,argv,selection)) return 0;
         if(not selection.trace_prefix.empty()) {
             for(std::string const& shape:selection.shapes) {
-                profile_adaptive_trace(
-                    selection.trace_prefix,shape,selection.verify_only);
+                if(selection.compare_contained_skip) {
+                    compare_contained_skip(selection,shape);
+                } else {
+                    profile_adaptive_trace(
+                        selection.trace_prefix,shape,selection.verify_only);
+                }
             }
             return 0;
         }
+        if(selection.compare_contained_skip)
+            throw std::invalid_argument(
+                "--compare-contained-skip requires --trace-prefix");
         std::vector<Datum> results;
         for(std::string const& shape:selection.shapes) {
             std::cout<<"Measuring "<<shape
