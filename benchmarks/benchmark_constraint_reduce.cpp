@@ -14,12 +14,11 @@
 #include "geometry/box.hpp"
 #include "foundation/logical.hpp"
 #include "logging/logging.hpp"
-#include "logging/logging_command_line_interface.hpp"
+#include "ariadne-benchmarking.hpp"
 
 #include <algorithm>
 #include <array>
 #include "numeric/rational.hpp"
-#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
@@ -34,6 +33,7 @@
 #include <vector>
 
 using namespace Ariadne;
+namespace Bench=Ariadne::Benchmarking;
 
 namespace {
 
@@ -46,6 +46,7 @@ struct Selection {
     std::vector<std::string> shapes{
         std::begin(known_shapes),std::end(known_shapes)};
     unsigned samples=7u;
+    unsigned warmups=0u;
     unsigned min_sample_ms=12u;
     unsigned max_iterations=256u;
     Bool verify_only=false;
@@ -67,16 +68,6 @@ struct Selection {
     std::string trace_prefix;
 };
 
-unsigned unsigned_argument(std::string const& text) {
-    if(text.empty() or text.front()=='-')
-        throw std::invalid_argument("expected nonnegative integer");
-    std::size_t used=0u;
-    unsigned long long number=std::stoull(text,&used);
-    if(used!=text.size() or number>std::numeric_limits<unsigned>::max())
-        throw std::invalid_argument("integer out of range");
-    return static_cast<unsigned>(number);
-}
-
 std::vector<std::string> shapes_argument(std::string const& input) {
     if(input.empty() or input.front()==',' or input.back()==',')
         throw std::invalid_argument("invalid shape list");
@@ -97,21 +88,6 @@ std::vector<std::string> shapes_argument(std::string const& input) {
     return result;
 }
 
-// Use the same public logging CLI and report conventions as numeric
-// benchmarks, without including numeric's private benchmark helper.
-class BenchmarkThreadRegistry : public ThreadRegistryInterface {
-  public:
-    Bool has_threads_registered() const override { return false; }
-};
-
-void initialize_benchmark_logging() {
-    static BenchmarkThreadRegistry registry;
-    auto& logger=Logger::instance();
-    if(not logger.has_thread_registry_attached())
-        logger.attach_thread_registry(&registry);
-    logger.configuration().set_verbosity(1u);
-}
-
 List<ArgumentParser> benchmark_argument_parsers(Selection& s) {
     List<ArgumentParser> parsers;
     auto number=[&](String const& short_id,String const& long_id,
@@ -120,7 +96,7 @@ List<ArgumentParser> benchmark_argument_parsers(Selection& s) {
         parsers.append(make_valued_argument_parser(
             short_id,long_id,help,
             [&field,low,high](String const& value)->VoidFunction {
-                unsigned const parsed=unsigned_argument(std::string(value));
+                unsigned const parsed=Bench::parse_unsigned<unsigned>(value);
                 if(parsed<low or parsed>high)
                     throw std::invalid_argument("integer argument out of range");
                 return [&field,parsed] {field=parsed;};
@@ -171,13 +147,6 @@ List<ArgumentParser> benchmark_argument_parsers(Selection& s) {
                or parsed<0.0 or parsed>4.0)
                 throw std::invalid_argument("width threshold must be in [0,4]");
             return [&s,parsed] {s.hybrid_width_threshold=parsed;};
-        }));
-    parsers.append(make_valued_argument_parser(
-        "","concurrency","Sequential benchmark; only 0 is supported",
-        [](String const& value)->VoidFunction {
-            if(value!="0")
-                throw std::invalid_argument("only --concurrency 0 is supported");
-            return [] {};
         }));
     flag("verify-only","Validate without collecting timings",s.verify_only);
     flag("compare-contained-skip","Compare P1 against legacy full scan",
@@ -933,9 +902,9 @@ Bool reduce_full_scan_reference(ConstraintSolver const& solver,
 void traced_reduce(ConstraintSolver const& solver,UpperBoxType& domain,
                    ValidatedVectorMultivariateFunction const& function,
                    ExactBoxType const& codomain,ReduceTraceStatistics& stats) {
-    using Clock=std::chrono::steady_clock;
+    using Clock=Bench::Clock;
     auto elapsed=[](Clock::time_point started)->double {
-        return std::chrono::duration<double>(Clock::now()-started).count();
+        return Bench::elapsed_ns(started,Clock::now())/1e9;
     };
     ++stats.queries;
     auto start=Clock::now();
@@ -1004,7 +973,7 @@ void profile_adaptive_trace(std::string const& prefix,
     ReduceTraceStatistics stats;
     stats.prepare(problem.function.result_size(),problem.initial_domain.size());
     SizeType mismatch=0u;
-    auto sweep_start=std::chrono::steady_clock::now();
+    auto sweep_start=Bench::Clock::now();
     for(TraceRecord const& entry:records) {
         // Reuse exactly the geometry and constraints from this shape; only
         // the query-box portion varies with the exported adaptive trace.
@@ -1026,8 +995,7 @@ void profile_adaptive_trace(std::string const& prefix,
         Bool empty=definitely(original.is_empty());
         if(empty!=entry.separated) ++mismatch;
     }
-    double sweep_ms=1000.0*std::chrono::duration<double>(
-        std::chrono::steady_clock::now()-sweep_start).count();
+    double sweep_ms=Bench::elapsed_ns(sweep_start,Bench::Clock::now())/1e6;
     if(mismatch!=0u) throw std::runtime_error(
         "solver replay disagrees with paving separation trace: "+shape+
         " mismatches="+std::to_string(mismatch));
@@ -1228,53 +1196,65 @@ void reduce_contained_skip(ConstraintSolver const& solver,
             < mul(near,previous.raw(),FloatDP(MINIMUM_REDUCTION,dp)));
 }
 
-template<class T>
-void keep_alive(T const& value) {
-#if defined(__GNUC__) || defined(__clang__)
-    asm volatile("" : : "g"(&value) : "memory");
-#else
-    static void const* volatile sink=nullptr;
-    sink=&value;
-#endif
-}
+// Use the framework's timing boundaries, calibration, samples and
+// optimization barrier for both default and experimental workloads.
+using Bench::keep_alive;
 
 struct Timing {
     double milliseconds;
     unsigned iterations;
+    Bench::Statistics statistics;
 };
 
 template<class Work>
-Timing median_ms(Work&& work,Selection const& selection) {
-    using Clock=std::chrono::steady_clock;
+Timing median_ms(Work&& work,Selection const& selection,
+                 std::string const& name="constraint-reduce") {
     unsigned iterations=1u;
-    auto run=[&](unsigned count) {
-        auto start=Clock::now();
-        for(unsigned i=0u;i<count;++i) {
-            auto value=work();
-            keep_alive(value);
-        }
-        return std::chrono::duration<double,std::milli>(
-            Clock::now()-start).count();
+    auto pilot=[&](unsigned count) {
+        return Bench::measure_ns([&] {
+            for(unsigned i=0u;i<count;++i) {
+                auto value=work();
+                Bench::keep_alive(value);
+            }
+        });
     };
-    double elapsed=run(iterations);
-    while(elapsed<static_cast<double>(selection.min_sample_ms)
-          and iterations<selection.max_iterations) {
-        unsigned next=iterations>selection.max_iterations/2u
-            ?selection.max_iterations:iterations*2u;
+    double elapsed=pilot(iterations);
+    double const minimum_ns=static_cast<double>(selection.min_sample_ms)*1e6;
+    // Preserve repeat-until-minimum behaviour; use the common calibration
+    // estimate to avoid the local duplicated duration/repetition formula.
+    while(elapsed<minimum_ns && iterations<selection.max_iterations) {
+        unsigned next=0u;
+        if(elapsed<=0.0 || not std::isfinite(elapsed)) {
+            next=iterations>selection.max_iterations/2u
+                ? selection.max_iterations:iterations*2u;
+        } else {
+            next=Bench::calibrated_repetitions(
+                elapsed,minimum_ns,iterations,selection.max_iterations);
+        }
+        if(next<=iterations) {
+            // A clamped calibration may round down; guarantee progress.
+            next=iterations>selection.max_iterations/2u
+                ? selection.max_iterations:iterations*2u;
+        }
         if(next==iterations) break;
         iterations=next;
-        elapsed=run(iterations);
+        elapsed=pilot(iterations);
     }
-    std::vector<double> samples;
-    samples.reserve(selection.samples);
-    for(unsigned i=0u;i<selection.samples;++i) {
-        double ms=run(iterations)/iterations;
-        if(not std::isfinite(ms) or ms<=0.0)
-            throw std::runtime_error("nonfinite/nonpositive timing");
-        samples.push_back(ms);
-    }
-    std::sort(samples.begin(),samples.end());
-    return {samples[selection.samples/2u],iterations};
+    Bench::Runner runner(selection.warmups,selection.shapes.size());
+    Bench::Samples const samples=runner.run(name,selection.samples,
+        [] {},
+        [&] {
+            for(unsigned i=0u;i<iterations;++i) {
+                auto value=work();
+                Bench::keep_alive(value);
+            }
+        },
+        [] {},
+        static_cast<double>(iterations));
+    Bench::Statistics const statistics=Bench::summarize(samples);
+    if(not std::isfinite(statistics.median) || statistics.median<=0.0)
+        throw std::runtime_error("nonfinite/nonpositive timing");
+    return {statistics.median/1e6,iterations,statistics};
 }
 
 // Same immutable adaptive query sequence and contract for both variants.
@@ -1706,10 +1686,9 @@ void traced_reduce_residual(
         ConstraintSolver const& solver,UpperBoxType& domain,
         ValidatedVectorMultivariateFunction const& function,
         ExactBoxType const& codomain,ResidualShavingStatistics& stats) {
-    using Clock=std::chrono::steady_clock;
+    using Clock=Bench::Clock;
     auto elapsed=[](Clock::time_point begin) {
-        return std::chrono::duration<double>(
-            Clock::now()-begin).count();
+        return Bench::elapsed_ns(begin,Clock::now())/1e9;
     };
     auto const begin=Clock::now();
     ++stats.queries;
@@ -3487,6 +3466,7 @@ struct Datum {
     SizeType queries;
     SizeType constraints;
     unsigned iterations;
+    Bench::Statistics statistics;
 };
 
 void append_case(std::vector<Datum>& data,Selection const& selection,
@@ -3627,10 +3607,11 @@ void append_case(std::vector<Datum>& data,Selection const& selection,
         throw std::runtime_error("reduction checksum mismatch");
 
     auto record=[&](char const* operation,auto&& workload) {
-        Timing timing=median_ms(workload,selection);
+        Timing timing=median_ms(workload,selection,shape+"/"+operation);
         data.push_back({shape,operation,timing.milliseconds,
                         problem.codomains.size(),
-                        problem.constraints_count,timing.iterations});
+                        problem.constraints_count,timing.iterations,
+                        timing.statistics});
     };
     record("reduce_full",full);
     record("hull_vector_fresh",hull_fresh);
@@ -3639,56 +3620,46 @@ void append_case(std::vector<Datum>& data,Selection const& selection,
     record("box_sweep_post_hull",box_sweep);
 }
 
-void report(std::vector<Datum> const& data,Selection const& selection) {
-    constexpr int width=121;
-    std::cout<<"ConstraintSolver::reduce() phase benchmark\n"
-             <<"Workload: 4D identity map plus five paving-equivalent"
-                " constraint formulas; 32 fixed dyadic query boxes/shape.\n"
-             <<"Prepared input functions and codomains are outside"
-                " all timed loops. The box sample is NOT paving's adaptive"
-                " collection.\n"
-             <<"Measured workloads overlap: full reduce, vector hull,"
-                " scalar hull (fresh/cached) and one post-hull box sweep.\n"
-             <<"Fresh/cached scalar hulls have matching steps; they need"
-                " not match the full-vector hull contractor.\n"
-             <<"Independent within-case medians. DO NOT add/subtract"
-                " phase medians to claim exact attribution.\n"
-             <<"samples="<<selection.samples
-             <<" min_sample_ms="<<selection.min_sample_ms
-             <<" max_iterations="<<selection.max_iterations
-             <<" manager=none  concurrency=0 (solver sequential)\n";
-    std::cout<<std::string(width,'=')<<"\n"
-             <<std::left<<std::setw(20)<<"Shape"<<"  "
-             <<std::setw(22)<<"Operation"
-             <<std::right<<std::setw(16)<<"Median (ms)"
-             <<std::setw(10)<<"Queries"
-             <<std::setw(14)<<"Constraints"
-             <<std::setw(15)<<"us/query"
-             <<std::setw(10)<<"Iter"<<"\n"
-             <<std::string(width,'-')<<"\n";
-    std::string previous;
+void report(std::vector<Datum> const& data,Selection const& selection,
+            Bench::SummaryFields const& summary_fields) {
+    LOGGING_PRINTLN("ConstraintSolver::reduce() phase benchmark")
+    LOGGING_PRINTLN("Workload: 4D identity map, five paving-equivalent constraint"
+        " formulas, 32 fixed dyadic boxes per shape. Inputs prepared outside timing.")
+    LOGGING_PRINTLN("Measured workloads overlap; independent phase medians must"
+        " not be added/subtracted as an exact cost attribution.")
+    LOGGING_PRINTLN("samples="<<selection.samples
+        <<" min_sample_ms="<<selection.min_sample_ms
+        <<" max_iterations="<<selection.max_iterations
+        <<" manager=none concurrency=0")
+
+    Bench::Report measurements("ConstraintSolver operation times (ns per sweep)",
+                               summary_fields);
+    measurements.set_dimension_columns({
+        {"Shape"}, {"Operation"},
+        {"Queries",0u,Bench::TableAlignment::Right},
+        {"Constraints",0u,Bench::TableAlignment::Right},
+        {"Iterations",0u,Bench::TableAlignment::Right},
+        {"Median (ms)",0u,Bench::TableAlignment::Right},
+        {"Median (us/query)",0u,Bench::TableAlignment::Right}
+    });
+    auto opts=Bench::TableOptions::ruled();
+    opts.group_columns={0u};
+    measurements.set_table_options(opts);
     for(Datum const& row:data) {
-        if(not previous.empty() and row.shape!=previous)
-            std::cout<<std::string(width,'-')<<"\n";
-        previous=row.shape;
-        std::cout<<std::left<<std::setw(20)<<row.shape<<"  "
-                 <<std::setw(22)<<row.operation
-                 <<std::right<<std::fixed<<std::setprecision(5)
-                 <<std::setw(16)<<row.milliseconds
-                 <<std::setw(10)<<row.queries
-                 <<std::setw(14)<<row.constraints
-                 <<std::setprecision(3)
-                 <<std::setw(15)<<(1000.0*row.milliseconds/row.queries)
-                 <<std::setw(10)<<row.iterations<<"\n";
+        measurements.add_row({
+            row.shape,row.operation,std::to_string(row.queries),
+            std::to_string(row.constraints),std::to_string(row.iterations),
+            Bench::Table::number(row.milliseconds,5u),
+            Bench::Table::number(1000.0*row.milliseconds/
+                                static_cast<double>(row.queries),3u)
+        },row.statistics);
     }
-    std::cout<<std::string(width,'=')<<"\n"
-             <<"Speed ratios: phase median / full_reduce median"
-                " (<1 means phase faster; not an additive cost breakdown).\n"
-             <<std::string(67,'=')<<"\n"
-             <<std::left<<std::setw(23)<<"Group"
-             <<std::right<<std::setw(12)<<"Cases"
-             <<std::setw(17)<<"Geomean"<<"\n"
-             <<std::string(67,'-')<<"\n";
+    measurements.print();
+
+    Bench::Table ratios({
+        {"Phase"}, {"Cases",0u,Bench::TableAlignment::Right},
+        {"Geomean phase/full",0u,Bench::TableAlignment::Right}
+    },Bench::TableOptions::ruled());
     for(char const* operation:{
             "hull_vector_fresh","hull_scalar_fresh",
             "hull_scalar_cached","box_sweep_post_hull"}) {
@@ -3701,40 +3672,36 @@ void report(std::vector<Datum> const& data,Selection const& selection) {
                     return candidate.shape==row.shape
                         and candidate.operation=="reduce_full";
                 });
-            if(full==data.end())
-                throw std::runtime_error("missing full reduce datum");
-            double ratio=row.milliseconds/full->milliseconds;
+            if(full==data.end()) throw std::runtime_error("missing full reduce datum");
+            double const ratio=row.milliseconds/full->milliseconds;
             if(not std::isfinite(ratio) or ratio<=0.0)
                 throw std::runtime_error("invalid phase ratio");
             total_log+=std::log(ratio);
             ++cases;
         }
-        std::cout<<std::left<<std::setw(23)<<operation
-                 <<std::right<<std::setw(12)<<cases
-                 <<std::fixed<<std::setprecision(3)
-                 <<std::setw(16)<<std::exp(total_log/cases)<<"x\n";
+        if(cases==0u) throw std::runtime_error("missing phase measurements");
+        ratios.add_row({operation,std::to_string(cases),
+            Bench::Table::number(std::exp(total_log/
+                    static_cast<double>(cases)),3u,"x")});
     }
-    std::cout<<std::string(67,'=')<<"\n";
+    LOGGING_PRINTLN("Phase median / full-reduce median; <1 means phase faster."
+                    " These are not additive cost components.")
+    LOGGING_PRINTLN(ratios.str())
 }
 
 } // namespace
 
 int main(int argc,char const* argv[]) {
-    initialize_benchmark_logging();
     try {
         Selection selection;
-        LoggingCommandLineInterface cli;
+        Bench::CommandLine cli;
         cli.add(CommandLineContribution(
             "constraint-solving-reduce-benchmark",
             benchmark_argument_parsers(selection)));
-        List<String> arguments;
-        for(int i=0;i<argc;++i) arguments.append(String(argv[i]));
-        if(not cli.acquire(arguments)) {
-            for(int i=1;i<argc;++i)
-                if(std::string(argv[i])=="-h"
-                   or std::string(argv[i])=="--help") return 0;
-            return 1;
-        }
+        if(not cli.acquire(argc,argv)) return 0;
+        if(ThreadManager::instance().concurrency()!=0u)
+            throw std::invalid_argument("constraint solver benchmark requires --concurrency 0");
+        selection.warmups=cli.warmups();
         if(selection.samples<3u or selection.samples%2u==0u)
             throw std::invalid_argument("samples must be odd and >=3");
         if(selection.prepared_batch_size!=0u
@@ -3838,7 +3805,7 @@ int main(int argc,char const* argv[]) {
                      <<" | d=4 | queries=32\n";
             append_case(results,selection,shape);
         }
-        if(not selection.verify_only) report(results,selection);
+        if(not selection.verify_only) report(results,selection,cli.summary_fields());
         return 0;
     } catch(std::exception const& error) {
         LOGGING_PRINTLN("benchmark_constraint_reduce: "<<error.what())

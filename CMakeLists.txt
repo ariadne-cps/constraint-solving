@@ -20,9 +20,9 @@ if(NOT TARGET ariadne-build)
 endif()
 
 if(EXISTS "${PROJECT_SOURCE_DIR}/.git")
-    # Compare direct occurrences; child commits guarantee internal consistency.
+    # Only production dependencies constrain Build; Testing and Benchmarking are independent.
     require_same_dependency_commit(Build CHAINS
-        "build" "nonlinear-programming|build" "testing|build")
+        "build" "nonlinear-programming|build")
 endif()
 
 setup_project()
@@ -53,7 +53,7 @@ setup_project_library(
     LINK_LIBRARIES constraint_solving
 )
 
-setup_standalone_project_tests(
+setup_standalone_project(
     TARGET ariadne-constraint-solving
     TEST_DIRECTORY tests
     TEST_TARGET tests
@@ -62,7 +62,7 @@ setup_standalone_project_tests(
         "${PROJECT_SOURCE_DIR}/src"
 )
 
-# Benchmarks are registered by setup_standalone_project_tests().
+# Benchmarks are registered automatically by setup_standalone_project().
 
 if(BUILD_PYTHON_BINDINGS)
     add_subdirectory(python)
