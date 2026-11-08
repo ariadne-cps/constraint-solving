@@ -1839,13 +1839,86 @@ cmake --build build-release --target benchmark_constraint_reduce
   --samples 7 --min-sample-ms 12 --concurrency 0
 ```
 
-**Status:** implementation is benchmark-only. Compilation, five-shape
-batch equivalence replay and calibrated timing remain pending.
-Positive P7 results would support designing an explicit
-caller-owned prepared context; they would not by themselves
-resolve cross-thread sharing, function lifetime, precision,
-immutability, or multiple-function reuse safety. No modification
-to production is made at P7.
+**Status (operator replay, 2026-11-08):** P7 compiled successfully,
+passed the batch-32 correctness-only replay and completed all five
+seven-sample timing experiments for N=1, 8, 32, 128, and 4096.
+Every one of the 25 per-shape batch checks reported
+`matched_production=true matched_trace=true` on the same 9,167
+trace queries. The actual production `reduce()` remains unchanged.
+The latest main commit before these results (`9bcd0d9`) also
+passed Ubuntu, macOS, Windows, Coverage and Sanitizers CI.
+These checks establish replay equivalence, not general prepared
+object lifetime/thread-safety guarantees.
+
+**Decision:** the recorded benefit already appears with N=8,
+so a long-lived global cache is not required to reproduce the
+bulk of the five-shape benchmark improvement. Proceed to the
+**design of an explicitly caller-owned prepared context**, with
+fixed function identity/lifetime, documented ownership and
+precision semantics, and targeted concurrency/reuse tests.
+Do not infer that 32 is intrinsically optimal from separately
+measured seven-sample runs. Do not promote a cache or change
+the default production API from this experiment alone.
+
+#### P7 five-shape operator results: finite-lifetime procedure reuse
+
+**Provenance:** operator macOS Release benchmark on 2026-11-08,
+trace prefix `$HOME/Downloads/traces/outer`, dimension 4,
+fineness 3, five shapes, 9,167 total queries, seven timed
+samples per variant, minimum calibrated sample duration 12 ms.
+One correctness-only replay for batch 32 was supplied separately,
+and the five timed replays each included a full correctness
+verification. For N=1, 8, 32, 128 and 4096, all 25
+`PREPARED_BATCH_VERIFIED` rows show exact equality with
+production and original paving separation bits. The pre-P6
+reference and full-scan checks also passed for every shape.
+
+| Batch N | Procedure builds across five shape sweeps | Current production P1 sum of medians (ms) | Batch P7 sum of medians (ms) | P1-relative speedup | Time reduction | Equal-weight geomean speedup |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 9,167 | 1500.35967 | 1493.25958 | 1.00475x | 0.47% | 0.99979x |
+| 8 | 1,147 | 1502.17259 | 1428.19571 | 1.05180x | 4.92% | 1.12935x |
+| 32 | 288 | 1505.54979 | 1426.53829 | **1.05539x** | **5.25%** | 1.14418x |
+| 128 | 74 | 1490.62533 | 1419.49908 | 1.05011x | 4.77% | 1.12515x |
+| 4096 | 5 | 1489.50633 | 1413.50013 | 1.05377x | 5.10% | 1.14899x |
+
+The ratio is the sum of baseline shape medians divided by
+the sum of batch medians **within the same batch-size run**.
+The raw total batch time across separate N runs should not be
+ranked directly: host load and calibrated timing vary between
+runs. In particular, the apparent optimum at N=32 is not a
+demonstrated performance optimum. The N=1 geometric mean is
+approximately one, as expected for two harnesses with no
+cross-query reuse.
+
+**Per-shape N=32 (construction cost included in timed sweeps):**
+
+| Shape | Verified queries | Procedure builds | Current P1 median ms | Batch P7 median ms | P1-relative speedup |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| aligned-box | 2,927 | 92 | 41.58383 | 27.33279 | 1.52139x |
+| rotated-box | 2,591 | 81 | 180.74433 | 153.87133 | 1.17465x |
+| aligned-ellipsoid | 1,127 | 36 | 330.19875 | 320.92871 | 1.02889x |
+| rotated-ellipsoid | 1,055 | 33 | 541.06808 | 530.23338 | 1.02043x |
+| ball | 1,467 | 46 | 411.95479 | 394.17208 | 1.04511x |
+| **Total** | **9,167** | **288** | **1505.54979** | **1426.53829** | **1.05539x** |
+
+All five shapes improved at N=8 and N=32, albeit weakly
+for some of the nonlinear cases. No retained box changed on
+any tested query. Compared to the earlier P6 per-query
+production optimization, P7 targets an incremental gain of
+about five percent of current P1 time on these traces.
+Prepared-hot remains a benchmark ceiling, not a safe
+default API.
+
+**Important remaining limitations:** all batches use an unchanged
+function per shape, and all five traces come from one d4/f3
+paving workload family. This does not test changing the function,
+different dimensions, varying precision, the lifetime of a
+compiled procedure after its source function is destroyed,
+or calls from multiple threads. A future prepared context must
+make these contracts explicit, compare identical outputs against
+current P1 under those scenarios, and separately benchmark
+end-to-end usage with actual object creation/destruction. No
+global mutable cache is justified.
 
 #### CI baseline after P6 and benchmark registration fixes
 
@@ -1858,7 +1931,9 @@ Sanitizers all completed successfully. The previous GCC 13
 shadowing fix (`de0cadb`) is therefore confirmed
 by cross-platform CI, not merely a local AppleClang replay.
 
-| 2026-11-08 | Confirmed main is now at `4baec3dc` after dependency updates and benchmark CMake standalone registration; latest Ubuntu/macOS/Windows/Coverage/Sanitizers workflows are green. Added P7 opt-in `--prepared-batch-size N` to existing P6 benchmark to measure a finite caller-owned vector-procedure lifetime with constructor cost inside each timed full-trace sweep, exact box and trace-bit checks on all five geometries, and Numeric-style batch table/aggregate against current production. | Source and journal updated; C++ build and operator five-shape batch verification/timing pending; no production change, no implicit/global cache. |
+| 2026-11-08 | Confirmed main at `4baec3dc` after dependency updates and benchmark CMake standalone registration; its CI was green. Added P7 opt-in `--prepared-batch-size N` to the existing C++ benchmark to measure finite vector-procedure lifetimes, including constructor cost inside timed full-trace sweeps, exact box and paving-bit checks on all five geometries, and Numeric-style batch reports against current production. | Initial implementation milestone; subsequent operator replay and all P7 results are documented below. No production change. |
+
+| 2026-11-08 | Operator P7 batch-32 verification passed on all five d4/f3 traces (9,167 queries, 288 preparations, zero differences against actual production or paving bits). Further seven-sample macOS Release runs on batch sizes 1/8/32/128/4096 passed all 25 per-shape equality checks. Aggregated same-run P1-relative speedups 1.00475x / 1.05180x / 1.05539x / 1.05011x / 1.05377x, including compilation inside every full-sweep timing sample. N=8 already yields nearly the full ~5% improvement. New main `9bcd0d9` CI: Ubuntu/macOS/Windows/Coverage/Sanitizers all successful. | P7 justifies designing an explicit short-lived, caller-owned prepared context, not any global cache or a numeric batch-size optimum. Production P1 and public API remain unchanged; general lifecycle, precision, alternative-function and concurrent-use tests are still required. |
 
 ### Update protocol
 
