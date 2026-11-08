@@ -25,6 +25,7 @@
 #include "function/functional.hpp"
 #include <chrono>
 #include <deque>
+#include <vector>
 
 #include "utility/macros.hpp"
 #include "utility/tuple.hpp"
@@ -137,6 +138,11 @@ Bool ConstraintSolver::reduce(UpperBoxType& domain, const ValidatedVectorMultiva
 
     if(definitely(domain.is_empty())) { return true; }
 
+    // Once a validated image is contained in its codomain, this output
+    // cannot exclude any point in the current or a subsequently contracted
+    // domain. Cache the proof within this call, never across queries.
+    std::vector<Bool> certified_satisfied(codomain.size(),false);
+
     FloatDPUpperBound domain_magnitude={0u,dp};
     for(SizeType j=0; j!=domain.size(); ++j) {
         domain_magnitude+=domain[j].width();
@@ -148,6 +154,11 @@ Bool ConstraintSolver::reduce(UpperBoxType& domain, const ValidatedVectorMultiva
         if(definitely(domain.is_empty())) { return true; }
 
         for(SizeType i=0; i!=codomain.size(); ++i) {
+            if(certified_satisfied[i]) { continue; }
+            if(definitely(subset(Ariadne::apply(function[i],domain),codomain[i]))) {
+                certified_satisfied[i]=true;
+                continue;
+            }
             for(SizeType j=0; j!=domain.size(); ++j) {
                 this->box_reduce(domain,function[i],codomain[i],j);
                 if(definitely(domain.is_empty())) { return true; }

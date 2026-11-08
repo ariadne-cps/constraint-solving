@@ -56,28 +56,40 @@ the separate `propagate` family described below.
 
 ## 2. Current production reduction design
 
-### 2.1 Full `reduce()`
+### 2.1 Production `reduce()`: certified containment scheduling
 
-The current production method:
+The production method, revised on 2026-11-08:
 
 1. Validates matching function/domain and result/codomain sizes,
-   and returns immediately if the incoming domain is proved empty.
-2. Computes a magnitude as the **sum of upper bounds** on coordinate
-   interval widths.
-3. Runs vector `hull_reduce(domain,function,codomain)`.
-   If the domain is proved empty, returns `true`.
-4. Runs `box_reduce(domain,function[i],codomain[i],j)` for every
-   output `i` and input coordinate `j` in their original order,
-   stopping immediately if the domain becomes empty.
-5. Recomputes the magnitude and repeats the hull+box round while
-   the magnitude is *strictly below* 0.75 times the previous
-   magnitude (using the existing validated/rounded comparison).
-   Otherwise returns `false`.
+   returning immediately if the incoming domain is proved empty.
+2. Initializes a Boolean cache of outputs that have been certified
+   satisfied throughout a domain. The cache is **local to one call**.
+3. Computes a magnitude as the sum of upper bounds on interval widths.
+4. Runs vector `hull_reduce(domain,function,codomain)`; returns on
+   certified emptiness.
+5. Visits outputs in their original order. Previously certified
+   outputs need no shaving. Otherwise a validated enclosure
+   `Ariadne::apply(function[i],domain)` is checked against
+   `codomain[i]`. Only if `definitely(subset(...))` succeeds is
+   that output marked satisfied and its coordinate-wise
+   `box_reduce` calls skipped. An uncertain or failed check
+   executes the **complete original coordinate sweep**.
+6. Recomputes the magnitude and repeats the hull+box round while
+   strictly below the original 0.75 reduction threshold.
 
-The 0.75 stopping factor and the original contractor order are part
-of the current **operational** behavior. Do not silently change either
-during a performance experiment. More than one full round can be needed
-to prove emptiness or reach the present stopping threshold.
+This leaves the hull contractor, the output and coordinate order,
+the early-empty behavior, and the existing stop criterion unchanged.
+Soundness follows because validated containment `f_i(D) subseteq C_i`
+continues to hold after future contractions `D' subseteq D`.
+No certificate is reused for a different `reduce()` query.
+
+The **old full-scan algorithm is retained exclusively in**
+`benchmarks/benchmark_constraint_reduce.cpp` as
+`reduce_full_scan_reference()`, to preserve an independent baseline.
+Unit tests exercise **only the production `ConstraintSolver::reduce()`
+API**, with expected outcomes, feasible witnesses and reductivity
+properties; they contain no copy of either full reduction algorithm
+and do not include benchmark headers.
 
 The vector `hull_reduce` path constructs a
 `Vector<Procedure<ValidatedNumber>>` for the current function and
@@ -255,7 +267,7 @@ Priority is based on the *measured bottleneck* and proof burden,
 not on expected headline speedups. None of the following is yet
 an accepted production-`reduce()` optimization.
 
-### P1 — Certified containment pruning (benchmark prototype)
+### P1 — Certified containment pruning (promoted to production)
 
 **Status:** implemented in
 `benchmark_constraint_reduce.cpp` at commit
@@ -263,7 +275,9 @@ an accepted production-`reduce()` optimization.
 **operator-verified on macOS Release, 2026-11-08:** all five adaptive
 traces passed exact final-domain and separation-bit checks; calibrated
 seven-sample medians show a speedup in every shape. The prototype
-remains diagnostic only, with no production solver changes.
+was promoted to production only after the trace-independent tests
+were confirmed green locally. Fresh production CI and adaptive
+trace replay results are pending on the promotion commit.
 
 For output `i`, first evaluate a validated enclosure
 `apply(function[i], domain)`. If
@@ -282,24 +296,24 @@ particularly on nonlinear constraints, and avoid claiming a
 win before observing `CONTAINED_SKIP_VERIFIED` and
 `CONTAINED_SKIP_COMPARE` on all five traces.
 
-The experimental algorithm is intentionally **duplicated locally**
-inside `tests/test_constraint_solver.cpp`; the benchmark keeps its
-own implementation. Do not introduce a shared header between the
-benchmark and the tests. This trades some maintenance duplication
-for independent build boundaries; when the experimental algorithm
-changes, synchronize the two copies deliberately and compare
-against the unmodified production oracle. The new trace-free
-test exercises both variants on independent scalar, coupled 2D,
-and mixed 3D cases, including certified containment, boundary
-contact, reuse across rounds, degenerate and empty domains,
-and nonlinear shaving-dependent infeasibility. The initial local macOS compilation failed because the unqualified `apply` selected `std::apply` (the test file imports `std`). The test-local copy now explicitly calls `Ariadne::apply` with unchanged numerical behavior. Compilation and test results after this correction are still pending.
+The trace-independent unit tests now call only production
+`ConstraintSolver::reduce()`. They verify contained and boundary
+identity cases, contraction and feasible witness preservation,
+empty and singleton domains, nonlinear shaving-dependent rejection,
+coupled constraints over a deterministic 2D grid, and a 3D mixed
+polynomial system. No legacy or experimental full-loop copy remains
+in the test file, and there is no shared benchmark/test header.
+The operator reported the previous regression suite green before
+promotion; the newly revised production tests require a fresh run.
 
-The prototype retains the original hull call, loop stopping
-threshold, and iteration structure. It compares full final
-contracted boxes and separation bits against the production
-oracle for all traced queries; then times independent calibrated
-full-sweep medians (rather than deriving a speedup from call
-counts). This is an experiment, not a production code change.
+Production preserves the original hull call, loop stopping
+threshold, and contractor order. The benchmark keeps a separate
+frozen full-scan reference and the independently measured
+experimental schedule. It compares the old full scan, experimental
+contained-skip implementation, and production on every adaptive
+query, then times old full scan versus production on calibrated
+full-sweep medians. This ensures the original speedup experiment
+remains meaningful after the promotion.
 
 ### P2 — Static variable dependencies
 
@@ -529,6 +543,8 @@ can be added for correctness-only replay.
 | 2026-11-08 | Added trace-independent regression cases for certified containment, with a deliberate local copy of the benchmark algorithm in the unit-test file; no shared benchmark/test header or production change. | Tests submitted; compilation and execution pending |
 
 | 2026-11-08 | Fixed test-only `apply` lookup ambiguity with libc++ `std::apply` by qualifying `Ariadne::apply`; benchmark and production algorithm unchanged. | Correction committed; test rerun pending |
+
+| 2026-11-08 | After green local test run, promote validated containment caching into vector `ConstraintSolver::reduce()`. Keep the frozen old full-scan only in benchmark as an independent speed/equivalence baseline; unit tests exercise production behavior and invariants directly, with no experimental loop copy. | Production change committed; cross-platform CI and post-promotion trace comparison pending |
 
 ### Update protocol
 

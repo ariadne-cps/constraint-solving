@@ -361,6 +361,36 @@ struct ReduceTraceStatistics {
     }
 };
 
+// Frozen pre-containment full-scan reducer. Benchmark-only reference:
+// the production reducer must not be used for this baseline.
+Bool reduce_full_scan_reference(ConstraintSolver const& solver,
+                                UpperBoxType& domain,
+                                ValidatedVectorMultivariateFunction const& function,
+                                ExactBoxType const& codomain) {
+    const ExactDouble MINIMUM_REDUCTION=0.75_x;
+    if(definitely(domain.is_empty())) return true;
+    FloatDPUpperBound magnitude={0u,dp};
+    for(SizeType j=0u;j<domain.size();++j)
+        magnitude+=domain[j].width();
+    FloatDPUpperBound previous=magnitude;
+    do {
+        solver.hull_reduce(domain,function,codomain);
+        if(definitely(domain.is_empty())) return true;
+        for(SizeType i=0u;i<codomain.size();++i) {
+            for(SizeType j=0u;j<domain.size();++j) {
+                solver.box_reduce(domain,function[i],codomain[i],j);
+                if(definitely(domain.is_empty())) return true;
+            }
+        }
+        previous=magnitude;
+        magnitude=0u;
+        for(SizeType j=0u;j<domain.size();++j)
+            magnitude+=domain[j].width();
+    } while(magnitude.raw()
+            < mul(near,previous.raw(),FloatDP(MINIMUM_REDUCTION,dp)));
+    return false;
+}
+
 void traced_reduce(ConstraintSolver const& solver,UpperBoxType& domain,
                    ValidatedVectorMultivariateFunction const& function,
                    ExactBoxType const& codomain,ReduceTraceStatistics& stats) {
@@ -443,12 +473,17 @@ void profile_adaptive_trace(std::string const& prefix,
         for(SizeType i=0u;i<4u;++i)
             codomain[i]=entry.box[i];
         UpperBoxType original=problem.initial_domain;
-        solver.reduce(original,problem.function,codomain);
+        reduce_full_scan_reference(solver,original,problem.function,codomain);
         UpperBoxType instrumented=problem.initial_domain;
         traced_reduce(solver,instrumented,problem.function,codomain,stats);
         if(not same(original,instrumented))
             throw std::runtime_error(
-                "instrumented reduce changed contracted domain for "+shape);
+                "instrumented legacy reducer differs from full-scan reference for "+shape);
+        UpperBoxType production=problem.initial_domain;
+        solver.reduce(production,problem.function,codomain);
+        if(not same(original,production))
+            throw std::runtime_error(
+                "production reducer differs from full-scan reference for "+shape);
         Bool empty=definitely(original.is_empty());
         if(empty!=entry.separated) ++mismatch;
     }
@@ -507,8 +542,8 @@ void profile_adaptive_trace(std::string const& prefix,
                  stats.total_seconds-stats.hull_seconds-stats.box_seconds)
              <<" paired_replay_wall_ms="<<sweep_ms
              <<"\n";
-    std::cout<<"SOLVER_TRACE measures an instrumented diagnostic replay and"
-                " a separate uninstrumented oracle call per input;"
+    std::cout<<"SOLVER_TRACE measures an instrumented legacy full-scan replay and"
+                " independent old-reference and production checks per input;"
                 " it is NOT a direct timing of paving::separated().\n";
 
     // The benchmark already verifies final-domain equivalence before
@@ -721,10 +756,16 @@ void compare_contained_skip(Selection const& selection,
     SizeType oracle_empty=0u;
     for(SizeType q=0u;q<targets.size();++q) {
         UpperBoxType baseline=problem.initial_domain;
-        solver.reduce(baseline,problem.function,targets[q]);
+        reduce_full_scan_reference(solver,baseline,problem.function,targets[q]);
         UpperBoxType candidate=problem.initial_domain;
         reduce_contained_skip(
             solver,candidate,problem.function,targets[q],&counters);
+        UpperBoxType production=problem.initial_domain;
+        solver.reduce(production,problem.function,targets[q]);
+        if(not same(candidate,production))
+            throw std::runtime_error(
+                "production differs from experimental containment reduction"
+                " shape="+shape+" query="+std::to_string(q));
         if(not same(baseline,candidate)) {
             throw std::runtime_error(
                 "certified containment pruning changed the contracted domain"
@@ -753,7 +794,8 @@ void compare_contained_skip(Selection const& selection,
         SizeType checksum=0u;
         for(ExactBoxType const& target:targets) {
             UpperBoxType domain=problem.initial_domain;
-            solver.reduce(domain,problem.function,target);
+            reduce_full_scan_reference(
+                solver,domain,problem.function,target);
             checksum+=static_cast<SizeType>(definitely(domain.is_empty()));
             keep_alive(domain);
         }
@@ -763,8 +805,7 @@ void compare_contained_skip(Selection const& selection,
         SizeType checksum=0u;
         for(ExactBoxType const& target:targets) {
             UpperBoxType domain=problem.initial_domain;
-            reduce_contained_skip(
-                solver,domain,problem.function,target);
+            solver.reduce(domain,problem.function,target);
             checksum+=static_cast<SizeType>(definitely(domain.is_empty()));
             keep_alive(domain);
         }
@@ -790,7 +831,7 @@ void compare_contained_skip(Selection const& selection,
              <<"\n";
     std::cout<<"CONTAINED_SKIP_COMPARE uses independent calibrated medians"
                 " and requires exact final-domain and separation equality"
-                " for every adaptive query. No production solver changed.\n";
+                " for every adaptive query. Production compared to frozen full scan.\n";
 }
 
 struct Datum {
