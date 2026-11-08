@@ -138,6 +138,12 @@ Bool ConstraintSolver::reduce(UpperBoxType& domain, const ValidatedVectorMultiva
 
     if(definitely(domain.is_empty())) { return true; }
 
+    // The vector hull reduction depends only on the function, not on the
+    // changing box or codomain. Compile it once for this reduce() call and
+    // reuse the same vector procedure in every hull round.
+    // Do not cache across calls: functions/precisions may differ.
+    Vector<ValidatedProcedure> const hull_procedure(function);
+
     // Once a validated image is contained in its codomain, this output
     // cannot exclude any point in the current or a subsequently contracted
     // domain. Cache the proof within this call, never across queries.
@@ -150,7 +156,7 @@ Bool ConstraintSolver::reduce(UpperBoxType& domain, const ValidatedVectorMultiva
     FloatDPUpperBound old_domain_magnitude=domain_magnitude;
 
     do {
-        this->hull_reduce(domain,function,codomain);
+        this->hull_reduce(domain,hull_procedure,codomain);
         if(definitely(domain.is_empty())) { return true; }
 
         for(SizeType i=0; i!=codomain.size(); ++i) {

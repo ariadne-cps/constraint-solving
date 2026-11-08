@@ -58,28 +58,34 @@ the separate `propagate` family described below.
 
 ### 2.1 Production `reduce()`: certified containment scheduling
 
-The production method, revised on 2026-11-08:
+The production method, revised on 2026-11-08 (including P6):
 
 1. Validates matching function/domain and result/codomain sizes,
    returning immediately if the incoming domain is proved empty.
-2. Initializes a Boolean cache of outputs that have been certified
+2. Constructs a `Vector<ValidatedProcedure>` **once per nonempty
+   call**, using the immutable vector-valued function. It is local
+   to the call, not a cross-query cache. The vector procedure uses
+   the same specialized shared-instruction representation as before.
+3. Initializes a Boolean cache of outputs that have been certified
    satisfied throughout a domain. The cache is **local to one call**.
-3. Computes a magnitude as the sum of upper bounds on interval widths.
-4. Runs vector `hull_reduce(domain,function,codomain)`; returns on
-   certified emptiness.
-5. Visits outputs in their original order. Previously certified
+4. Computes a magnitude as the sum of upper bounds on interval widths.
+5. Runs vector `hull_reduce(domain,hull_procedure,codomain)` with
+   the prepared local procedure; returns on certified emptiness.
+6. Visits outputs in their original order. Previously certified
    outputs need no shaving. Otherwise a validated enclosure
    `Ariadne::apply(function[i],domain)` is checked against
    `codomain[i]`. Only if `definitely(subset(...))` succeeds is
    that output marked satisfied and its coordinate-wise
    `box_reduce` calls skipped. An uncertain or failed check
    executes the **complete original coordinate sweep**.
-6. Recomputes the magnitude and repeats the hull+box round while
+7. Recomputes the magnitude and repeats the hull+box round while
    strictly below the original 0.75 reduction threshold.
 
 This leaves the hull contractor, the output and coordinate order,
 the early-empty behavior, and the existing stop criterion unchanged.
-Soundness follows because validated containment `f_i(D) subseteq C_i`
+The P6 change removes repeated vector-procedure compilation across
+rounds but retains the exact same procedure constructor and
+vector-hull overload. Soundness follows because validated containment `f_i(D) subseteq C_i`
 continues to hold after future contractions `D' subseteq D`.
 No certificate is reused for a different `reduce()` query.
 
@@ -91,12 +97,14 @@ API**, with expected outcomes, feasible witnesses and reductivity
 properties; they contain no copy of either full reduction algorithm
 and do not include benchmark headers.
 
-The vector `hull_reduce` path constructs a
-`Vector<Procedure<ValidatedNumber>>` for the current function and
-runs `simple_hull_reduce`. The scalar hull overload also has a
-procedure-based counterpart. Procedure compilation/caching can change
-cost, but scalar and vector hull paths must not be assumed
-interchangeable without testing the actual contracted boxes.
+The public vector `hull_reduce(domain,function,codomain)` overload
+still constructs a fresh `Vector<Procedure<ValidatedNumber>>`
+and runs `simple_hull_reduce`. **Only vector-valued
+`ConstraintSolver::reduce()`** now constructs this procedure once
+per call and reuses the existing procedure-based hull overload in
+every round. The scalar hull overload also has a procedure-based
+counterpart. Scalar and vector hull paths remain distinct; no
+persistent/global procedure cache was introduced.
 
 ### 2.2 One `box_reduce()` call
 
@@ -1439,17 +1447,19 @@ preserve the original measurements.
 
 ### P6 — Reuse compiled vector hull procedures (benchmark only)
 
-**Status (2026-11-08):** operator build, correctness-only replay and
-seven-sample timing **passed** for all five d4/f3 paving shapes
-(9,167 queries). P1, per-query and prepared hull returned
-representation-exactly identical boxes matching the frozen
-full scan and exported paving separation bits. Compared with P1,
-Per-query reduced the sum of per-shape medians by **9.1%**;
-Prepared reduced that sum, including the separately calibrated
-one-time compilation estimate, by **13.6%**. Both variants were
-faster than P1 on every measured shape. **No production/API
-change has yet been made**; repeatability, adversarial regressions
-and appropriate prepared-function lifetime remain to verify.
+**Status (2026-11-08):** P6 correctness-only replay and seven-sample
+timing passed on all five d4/f3 paving shapes (9,167 queries).
+Per-query saved **9.05%** of the historical sum of P1 medians;
+Prepared-amortized saved an estimated **13.61%**. All replayed final
+boxes matched exactly. Following this positive experimental result,
+**the Per-query variant has been integrated internally into the
+production `ConstraintSolver::reduce()` implementation** without
+changing its public API or adding persistent cache state. The
+cross-query Prepared variant remains benchmark-only. **CI builds,
+general unit tests and a fresh operator replay/timing with the
+modified production library are still pending**; the historical
+performance results must not be presented as measurements of the
+new production binary.
 
 The current production P1 `ConstraintSolver::reduce()`
 calls vector `hull_reduce()` in each contraction round;
@@ -1460,10 +1470,12 @@ same immutable vector function. The benchmark's new
 these repeated procedure constructions while **preserving the
 whole P1 algorithm**. It compares:
 
-1. **P1:** production `reduce()` (rebuild per hull round).
-2. **Per-query:** construct one vector of validated procedures per
-   `reduce` call; reuse it across all hull rounds in
-   that call. The construction is **included** in measured time.
+1. **Pre-P6 P1:** frozen, benchmark-only pre-integration `reduce()`
+   implementation (rebuild the vector procedure per hull round).
+2. **Current production P1 / Per-query:** the real
+   `ConstraintSolver::reduce()` API, constructing one vector of
+   validated procedures per call and reusing it across all rounds.
+   The construction is **included** in measured time.
 3. **Prepared:** construct one vector from the immutable function
    per shape/workload, reuse it across all queries and rounds.
    Timed warm sweeps exclude the one-time construction; report
@@ -1474,8 +1486,9 @@ Each candidate follows the current production hull pass, certified
 containment guards, output and variable order, box-contractor
 calls, early-empty behavior, and 0.75 aggregate width stop rule.
 Before timing every query must satisfy **representation-exact
-final-box equality** with production P1 and the frozen pre-P1
-full-scan reference, plus the original paving separation bits.
+final-box equality** with the frozen pre-P6 P1, actual optimized
+production P1, the per-query algorithm prototype and the earlier
+frozen full-scan reference, plus the original paving separation bits.
 This is stronger than simply observing equal empty counts or
 soundness on one geometry. The verification operates on all five
 trace shapes (9,167 queries in the 2026-11-08 operator sample).
@@ -1633,15 +1646,16 @@ this was the only invalid member call. Subsequent operator
 correctness-only and seven-sample timed replays completed
 successfully on all five shapes.
 
-**Design decision:** both P6 variants are empirically faster on
-all five benchmark shapes, while retaining representation-exact
-final boxes. Per-query can be integrated inside P1 without
-persistent ownership. Prepared still needs an explicitly owned
-compiled-function lifetime, attention to thread safety and
-precision, and a separate design decision. Before promotion,
-repeat the timed experiment and run general/adversarial test
-coverage beyond the fixed traces. No current result establishes
-general correctness based only on the replay set.
+**Design decision:** Per-query is integrated inside production P1
+as a deliberately minimal change with local, immutable procedure
+ownership. Prepared is *not* promoted: it still needs explicit
+compiled-function lifetime, thread-safety and precision design.
+The benchmark keeps frozen pre-P6 P1 independent of current
+production, so speedups cannot disappear when the reference
+advances. The reported historical 7-sample measurements were
+collected **before** integration; compile, unit-test, replay and
+timing verification on the new binary remain necessary. The
+recorded traces cannot prove equivalence for arbitrary inputs.
 
 | 2026-11-08 | Added P6 benchmark-only reuse of precompiled vector hull procedures in P1: production rebuild-per-round vs compile once per query vs prepare once per function across all five d4/f3 paving traces. Exact final-box and exported separation equivalence required against both production and frozen full scan for every query. Numeric-style logging CLI report with per-shape medians, separate compilation median, five-shape geometric mean and workload-weighted totals. | Full C++ build and operator five-shape replay/timings pending; production and API unchanged, per-workload reuse requires explicitly prepared-function ownership. |
 
@@ -1654,6 +1668,79 @@ general correctness based only on the replay set.
 | 2026-11-08 | Operator completed C++ P6 correctness-only replay on all five d4/f3 paving shapes, 9,167 queries using `$HOME/Downloads/traces/outer`: P1 and both procedure-reuse variants matched exactly for every final box, frozen full-scan output and exported separation bit. Totals: 2,258 empty, 26,302 hull rounds, 83,541 box calls. All five `PRECOMPILED_HULL_VERIFIED` rows reported `matched_p1=true matched_legacy=true matched_trace=true`. | Compiler issues closed; no timing results yet. Run seven-sample whole-trace timings including separate prepared-construction cost before considering production changes. |
 
 | 2026-11-08 | Operator P6 7-sample C++ benchmark completed on all five d4/f3 paving shapes (9,167 queries, `$HOME/Downloads/traces/outer`), all final boxes exactly equal to P1/frozen full scan and trace bits. Sum of shape medians P1 1653.29937 ms, Per-query 1503.63379 ms (1.09954x, 9.05% less elapsed), Prepared-hot 1428.31517 ms, separate one-build medians total 0.03064 ms, Prepared-amortized 1428.34581 ms (1.15749x, 13.61% less elapsed). Equal-shape geometric means 1.13295x Per-query and 1.29852x Prepared-amortized; all shapes faster than P1. | Positive P6 result, unlike P1+adaptive hybrid. Prefer controlled Per-query integration as a no-API-change optimization after broader correctness/CI coverage, then separately consider explicitly owned prepared-function reuse; do not introduce implicit global cache. |
+
+#### P6 production integration: implementation and validation plan (2026-11-08)
+
+**Code change:** `src/constraint_solver.cpp` now creates
+`Vector<ValidatedProcedure> const hull_procedure(function)`
+exactly once per nonempty vector `reduce()` call, immediately after
+the existing size preconditions and empty-domain shortcut.
+Every contraction round invokes
+`this->hull_reduce(domain,hull_procedure,codomain)` rather than the
+function overload, which used to recompile the same procedure each
+round. The 0.75 width-stopping rule, certified-containment cache
+lifetime, coordinate/output iteration order, and early emptiness
+behavior are unchanged. The `hull_reduce` overloads and all
+public headers/API remain unchanged. A different function and
+codomain in subsequent calls necessarily get independent local
+preparation.
+
+**Regression coverage:** the new
+`test_reduce_per_query_procedure_lifetime` exercises repeated and
+alternating calls with broad, narrow and infeasible codomains
+using the same function and a different function with the same
+dimensions/output count; it verifies stable outputs, reductivity,
+a known feasible witness and absence of cross-call proof reuse.
+Existing `test_reduce_certified_containment`,
+`test_reduce_edge_cases` and other solver tests remain in place.
+Ubuntu and macOS Release CI now also compile the opt-in
+`benchmark_constraint_reduce` target to detect specialized
+vector-procedure API regressions (especially those previously
+missed by CI because the benchmark target was not built).
+
+**Frozen baseline:** the diagnostic C++ benchmark now has a
+`reduce_pre_p6_reference` function, a standalone frozen copy of
+the previous P1 loop, **with a fresh function-overload hull
+compilation in each round**. On the P6 comparison path, the
+new `solver.reduce()` implementation is independently compared
+with that baseline and the existing frozen full-scan implementation.
+The timings labelled `p1_ms` measure the *old* frozen P1,
+`per_query_ms` measure the real *new production P1*, and
+`prepared_ms` retain the benchmark-only cross-query variant.
+The original machine-readable timing keys remain intact with
+explicit `baseline=frozen_pre_p6_p1` and
+`per_query=current_production_reduce` labels.
+
+**Validation status:** source, tests, CI definitions, and benchmark
+have been updated, but no complete local/CI build, new five-shape
+exact-box replay, or new timings have yet been executed on this
+integration commit. Run unit tests first; then benchmark verification
+on all five operator traces; finally repeat seven-sample timings.
+The historical P6 gains motivate the change but do not by themselves
+validate this production commit.
+
+```sh
+git pull --ff-only
+cmake --build build-release --target test_constraint_solver benchmark_constraint_reduce
+ctest --test-dir build-release -R '^test_constraint_solver
+For every follow-up investigation: add a dated row to the
+decision log; revise **Current production reduction design**
+only when production code actually changes; record new
+measurements with environment/trace provenance; and update
+the **status and risks** of the affected proposal.
+Commit these documentation changes alongside the relevant
+benchmark/solver changes, rather than leaving design history
+in a chat or solely in `paving/doc`.
+ --output-on-failure
+./build-release/benchmarks/benchmark_constraint_reduce \
+  --trace-prefix "$HOME/Downloads/traces/outer" \
+  --compare-precompiled-hull --verify-only --concurrency 0
+./build-release/benchmarks/benchmark_constraint_reduce \
+  --trace-prefix "$HOME/Downloads/traces/outer" \
+  --compare-precompiled-hull --samples 7 --min-sample-ms 12 --concurrency 0
+```
+
+| 2026-11-08 | Promoted the P6 Per-query prepared vector hull into production `ConstraintSolver::reduce()`: construct one `Vector<ValidatedProcedure>` per nonempty call and reuse across hull rounds, keeping the original schedule, local certification cache and public API unchanged. P6 benchmark now contains a frozen pre-P6 P1 comparator, checks actual production P1 against pre-P6 P1 and full scan on all five shapes, and times the real production reducer. Added alternating-codomain/different-function unit regression; Ubuntu/macOS Release CI compile the benchmark to catch specialized-procedure API mistakes. | Production integration staged for validation; fresh full build, C++ test suite, all-shape equality replay and calibrated timings pending. Prepared cross-query variant remains benchmark-only. |
 
 ### Update protocol
 

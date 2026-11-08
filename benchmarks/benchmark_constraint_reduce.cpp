@@ -3003,6 +3003,54 @@ void print_hybrid_report(
 // with a constructor taking VectorMultivariateFunction directly and
 // a shared instruction graph (not the generic UniformArray container).
 // That specialization must be included before constraint_solver.hpp.
+// Frozen pre-P6 P1, retaining per-round procedure construction.
+// The P1 comparator must not silently become the new production reducer
+// after the cache optimization is promoted. This code is a benchmark-only
+// historical reference, not an alternate production or public algorithm.
+Bool reduce_pre_p6_reference(
+        ConstraintSolver const& solver,
+        UpperBoxType& domain,
+        ValidatedVectorMultivariateFunction const& function,
+        ExactBoxType const& codomain) {
+    const ExactDouble MINIMUM_REDUCTION = 0.75_x;
+    if(function.argument_size()!=domain.size()
+       or function.result_size()!=codomain.size())
+        throw std::invalid_argument("P6 baseline dimension mismatch");
+
+    if(definitely(domain.is_empty())) return true;
+    std::vector<Bool> certified_satisfied(codomain.size(),false);
+
+    FloatDPUpperBound domain_magnitude={0u,dp};
+    for(SizeType j=0; j!=domain.size(); ++j)
+        domain_magnitude+=domain[j].width();
+    FloatDPUpperBound old_domain_magnitude=domain_magnitude;
+
+    do {
+        // Important: function overload constructs vector procedures each round.
+        solver.hull_reduce(domain,function,codomain);
+        if(definitely(domain.is_empty())) return true;
+
+        for(SizeType i=0; i!=codomain.size(); ++i) {
+            if(certified_satisfied[i]) continue;
+            if(definitely(subset(Ariadne::apply(function[i],domain),codomain[i]))) {
+                certified_satisfied[i]=true;
+                continue;
+            }
+            for(SizeType j=0; j!=domain.size(); ++j) {
+                solver.box_reduce(domain,function[i],codomain[i],j);
+                if(definitely(domain.is_empty())) return true;
+            }
+        }
+        old_domain_magnitude=domain_magnitude;
+        domain_magnitude=0u;
+        for(SizeType j=0; j!=domain.size(); ++j)
+            domain_magnitude+=domain[j].width();
+    } while(domain_magnitude.raw()
+            < mul(near,old_domain_magnitude.raw(),
+                  FloatDP(MINIMUM_REDUCTION,dp)));
+    return false;
+}
+
 struct PreparedHullStatistics {
     SizeType calls=0u;
     SizeType hull_rounds=0u;
@@ -3096,13 +3144,17 @@ PreparedHullRow compare_precompiled_hull(
     for(SizeType q=0u;q<trace.size();++q) {
         auto const& codomain=codomains[q];
         UpperBoxType baseline=problem.initial_domain;
-        solver.reduce(baseline,problem.function,codomain);
+        reduce_pre_p6_reference(
+            solver,baseline,problem.function,codomain);
         UpperBoxType legacy=problem.initial_domain;
         reduce_full_scan_reference(solver,legacy,problem.function,codomain);
-        if(not same(baseline,legacy))
+        UpperBoxType production=problem.initial_domain;
+        solver.reduce(production,problem.function,codomain);
+        if(not same(baseline,legacy)
+           or not same(baseline,production))
             throw std::runtime_error(
-                "P6 production differs from frozen full scan shape="
-                +shape+" query="+std::to_string(q));
+                "P6 current production differs from frozen pre-P6 P1"
+                " or full scan shape="+shape+" query="+std::to_string(q));
 
         UpperBoxType per_query=problem.initial_domain;
         Vector<ValidatedProcedure> const local(problem.function);
@@ -3120,6 +3172,7 @@ PreparedHullRow compare_precompiled_hull(
         }
         Bool const empty=definitely(baseline.is_empty());
         if(empty!=trace[q].separated
+           or empty!=definitely(production.is_empty())
            or empty!=definitely(per_query.is_empty())
            or empty!=definitely(precompiled.is_empty()))
             throw std::runtime_error(
@@ -3138,7 +3191,8 @@ PreparedHullRow compare_precompiled_hull(
         <<" certificates="<<row.schedule.certificates
         <<" reused_certificates="<<row.schedule.cached_certificates
         <<" box_calls="<<row.schedule.box_calls
-        <<" matched_p1=true matched_legacy=true matched_trace=true")
+        <<" matched_p1=true matched_legacy=true matched_trace=true"
+        <<" matched_pre_p6=true matched_current_production=true")
     if(selection.verify_only) return row;
 
     // Timed workloads each include all query setup/reduction/cleanup.
@@ -3149,11 +3203,12 @@ PreparedHullRow compare_precompiled_hull(
         for(auto const& codomain:codomains) {
             UpperBoxType domain=problem.initial_domain;
             if(variant==0u) {
-                solver.reduce(domain,problem.function,codomain);
+                reduce_pre_p6_reference(
+                    solver,domain,problem.function,codomain);
             } else if(variant==1u) {
-                Vector<ValidatedProcedure> const local(problem.function);
-                reduce_with_precompiled_hull(
-                    solver,domain,problem.function,codomain,local);
+                // Measure the actual production implementation of P6,
+                // not an auxiliary benchmark implementation of P1.
+                solver.reduce(domain,problem.function,codomain);
             } else {
                 reduce_with_precompiled_hull(
                     solver,domain,problem.function,codomain,prepared);
@@ -3201,6 +3256,8 @@ PreparedHullRow compare_precompiled_hull(
         <<" prepared_hot_speedup="<<(row.p1_ms/row.prepared_ms)
         <<" prepared_amortized_speedup="
               <<(row.p1_ms/(row.prepared_ms+row.compile_once_ms))
+        <<" baseline=frozen_pre_p6_p1"
+        <<" per_query=current_production_reduce"
         <<" samples="<<selection.samples)
     return row;
 }
@@ -3209,11 +3266,11 @@ void print_precompiled_hull_report(
         std::vector<PreparedHullRow> const& rows,Selection const& selection) {
     if(rows.empty()) throw std::runtime_error("empty P6 benchmark");
     LOGGING_PRINTLN(" ")
-    LOGGING_PRINTLN("P1 / vector-hull procedure reuse | d=4 f=3"
+    LOGGING_PRINTLN("Pre-P6 P1 / current P1 / prepared vector hull | d=4 f=3"
                    <<" | shapes="<<rows.size()
                    <<" | samples="<<selection.samples)
-    LOGGING_PRINTLN("Every retained box and certified separation agrees"
-                   " exactly with P1 and the frozen full scan on each trace.")
+    LOGGING_PRINTLN("Current production and prepared variants match"
+                   " frozen pre-P6 P1, full scan and paving separation bits.")
     if(selection.verify_only) {
         LOGGING_PRINTLN("Correctness-only replay; timing not collected.")
         return;
@@ -3221,8 +3278,8 @@ void print_precompiled_hull_report(
 
     LOGGING_PRINTLN(std::string(112u,'='))
     LOGGING_PRINTLN(std::left<<std::setw(20)<<"Shape"
-        <<std::right<<std::setw(13)<<"P1 (ms)"
-        <<std::setw(17)<<"Per-query (ms)"
+        <<std::right<<std::setw(13)<<"Old P1 (ms)"
+        <<std::setw(17)<<"Current P1 (ms)"
         <<std::setw(17)<<"Prepared (ms)"
         <<std::setw(17)<<"Build (ms)"
         <<std::setw(14)<<"Query/P1"
@@ -3269,8 +3326,8 @@ void print_precompiled_hull_report(
         <<" prepared_hot_total_speedup="<<(total_p1/total_prepared)
         <<" prepared_amortized_total_speedup="
             <<(total_p1/(total_prepared+total_build)))
-    LOGGING_PRINTLN("Speedup >1 means faster than production P1."
-                   " Per-query timing includes its procedure build."
+    LOGGING_PRINTLN("Speedup >1 means faster than frozen pre-P6 production P1."
+                   " Per-query timing is the current production reduce()."
                    " Prepared-hot timing excludes setup; amortized adds"
                    " the separately calibrated one-build median per shape."
                    " Sums of independently measured medians are not paired"

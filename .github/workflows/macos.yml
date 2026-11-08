@@ -64,7 +64,7 @@ jobs:
 
       - name: Build Release library and bindings
         if: matrix.build_type == 'Release'
-        run: cmake --build "${{ runner.workspace }}/build" --parallel "$NPROC" --target ariadne-constraint-solving bindings
+        run: cmake --build "${{ runner.workspace }}/build" --parallel "$NPROC" --target ariadne-constraint-solving bindings benchmark_constraint_reduce
 
       - name: Install Release library
         if: matrix.build_type == 'Release'

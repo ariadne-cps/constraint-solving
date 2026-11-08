@@ -1329,6 +1329,74 @@ class TestConstraintSolver : public Ariadne::Testing::ContextFixture
             })))));
     }
 
+    Void test_reduce_per_query_procedure_lifetime() {
+        ConstraintSolver solver;
+        auto x=ValidatedScalarMultivariateFunction::coordinates(2);
+        ValidatedVectorMultivariateFunction function({
+            x[0]+x[1],x[0]*x[1]
+        });
+        ExactBoxType const initial({
+            {0.0_x,1.0_x},{0.0_x,1.0_x}
+        });
+        ExactBoxType const broad_codomain({
+            {-1.0_x,3.0_x},{-1.0_x,2.0_x}
+        });
+        ExactBoxType const narrow_codomain({
+            {0.75_x,1.25_x},{0.0_x,0.25_x}
+        });
+        ExactBoxType const impossible_codomain({
+            {3.0_x,4.0_x},{0.0_x,1.0_x}
+        });
+
+        // Alternate codomains while reusing the same function and solver.
+        // Neither the certified-containment state nor the procedure may
+        // accidentally depend on the previous reduce() query.
+        UpperBoxType broad_first=initial;
+        ARIADNE_TESTING_PROVE(not solver.reduce(
+            broad_first,function,broad_codomain));
+        ARIADNE_TESTING_EXPECT_SAME(broad_first,UpperBoxType(initial));
+
+        UpperBoxType narrowed=initial;
+        ARIADNE_TESTING_PROVE(not solver.reduce(
+            narrowed,function,narrow_codomain));
+        ARIADNE_TESTING_PROVE(refines(narrowed,UpperBoxType(initial)));
+        ARIADNE_TESTING_PROVE(not definitely(disjoint(
+            narrowed,UpperBoxType(ExactBoxType({
+                {0.5_x,0.5_x},{0.5_x,0.5_x}
+            })))));
+
+        UpperBoxType rejected=initial;
+        ARIADNE_TESTING_PROVE(solver.reduce(
+            rejected,function,impossible_codomain));
+        ARIADNE_TESTING_PROVE(definitely(rejected.is_empty()));
+
+        UpperBoxType broad_again=initial;
+        ARIADNE_TESTING_PROVE(not solver.reduce(
+            broad_again,function,broad_codomain));
+        ARIADNE_TESTING_EXPECT_SAME(broad_again,broad_first);
+
+        UpperBoxType narrow_again=initial;
+        ARIADNE_TESTING_PROVE(not solver.reduce(
+            narrow_again,function,narrow_codomain));
+        ARIADNE_TESTING_EXPECT_SAME(narrow_again,narrowed);
+
+        // A separate function of the same dimension and result count
+        // must compile its own vector procedure, never the previous one.
+        ValidatedVectorMultivariateFunction other({
+            x[0],x[1]
+        });
+        UpperBoxType other_domain=initial;
+        ARIADNE_TESTING_PROVE(not solver.reduce(
+            other_domain,other,ExactBoxType({
+                {0.25_x,0.75_x},{0.25_x,0.75_x}
+            })));
+        ARIADNE_TESTING_PROVE(refines(other_domain,UpperBoxType(initial)));
+        ARIADNE_TESTING_PROVE(not definitely(disjoint(
+            other_domain,UpperBoxType(ExactBoxType({
+                {0.5_x,0.5_x},{0.5_x,0.5_x}
+            })))));
+    }
+
     Void test_reduce_edge_cases() {
         ConstraintSolver solver;
         auto x=ValidatedScalarMultivariateFunction::coordinates(1);
@@ -1708,6 +1776,7 @@ int main(int argc, char** argv)
     ARIADNE_TESTING_ADD_TEST(TestConstraintSolver, test_propagate);
     ARIADNE_TESTING_ADD_TEST(TestConstraintSolver, test_precompiled_propagate);
     ARIADNE_TESTING_ADD_TEST(TestConstraintSolver, test_reduce_certified_containment);
+    ARIADNE_TESTING_ADD_TEST(TestConstraintSolver, test_reduce_per_query_procedure_lifetime);
     ARIADNE_TESTING_ADD_TEST(TestConstraintSolver, test_reduce_edge_cases);
     ARIADNE_TESTING_ADD_TEST(TestConstraintSolver, test_check_feasibility);
     ARIADNE_TESTING_ADD_TEST(TestConstraintSolver, test_logging_branches);
