@@ -1141,8 +1141,9 @@ void profile_adaptive_trace(std::string const& prefix,
     for(SizeType index=0u;index<stats.by_pair.size();++index)
         ranks.push_back(index);
     std::sort(ranks.begin(),ranks.end(),
-        [&](SizeType a,SizeType b) {
-            return stats.by_pair[a].seconds>stats.by_pair[b].seconds;
+        [&](SizeType lhs_index,SizeType rhs_index) {
+            return stats.by_pair[lhs_index].seconds
+                 > stats.by_pair[rhs_index].seconds;
         });
     SizeType dimensions=stats.by_variable.size();
     for(SizeType rank=0u;rank<std::min(SizeType(8u),ranks.size());++rank) {
@@ -1882,11 +1883,14 @@ void profile_residual_shaving(Selection const& selection,
     for(SizeType pair=0u;pair<stats.by_pair.size();++pair) {
         if(stats.by_pair[pair].calls!=0u) ranking.push_back(pair);
     }
-    std::sort(ranking.begin(),ranking.end(),[&](SizeType a,SizeType b) {
-        if(stats.by_pair[a].seconds!=stats.by_pair[b].seconds)
-            return stats.by_pair[a].seconds>stats.by_pair[b].seconds;
-        return a<b;
-    });
+    std::sort(ranking.begin(),ranking.end(),
+        [&](SizeType lhs_index,SizeType rhs_index) {
+            if(stats.by_pair[lhs_index].seconds
+               !=stats.by_pair[rhs_index].seconds)
+                return stats.by_pair[lhs_index].seconds
+                     > stats.by_pair[rhs_index].seconds;
+            return lhs_index<rhs_index;
+        });
     SizeType const variables=problem.initial_domain.size();
     SizeType const limit=std::min(ranking.size(),SizeType(12u));
     for(SizeType rank=0u;rank<limit;++rank) {

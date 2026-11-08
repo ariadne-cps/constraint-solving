@@ -1774,6 +1774,8 @@ ctest --test-dir build-release -R '^test_constraint_solver$' --output-on-failure
 
 | 2026-11-08 | Operator post-integration P6 validation: successful C++ benchmark build, correctness-only replay and seven-sample timed replay on all five d4/f3 shapes (9,167 queries at `$HOME/Downloads/traces/outer`). Actual production Per-query matches frozen pre-P6 P1/full scan/paving bits exactly on every query. Old P1 summed medians 1668.32029 ms; new production 1511.11358 ms (1.10403x, 9.42% less time); Prepared-hot 1434.74808 ms, single-build estimates sum 0.02997 ms, Prepared-amortized 1434.77805 ms (1.16277x vs old P1). New production 1.13633x geometric-mean speedup; all shapes improve. Also repaired a corrupted validation command block in this journal. | Retain Per-query production optimization; C++ unit-test suite and CI outcomes not supplied in operator log. Prepared remains benchmark-only; avoid general correctness or cold-start performance claims from these traces alone. |
 
+| 2026-11-08 | Ubuntu GCC 13 Release CI (`-Werror -Wshadow`) exposed a benchmark-only name collision in the hottest-pair sort comparator: lambda parameter `a` hid the earlier local `a=stats.box_activity`. Renamed the comparator parameters to `lhs_index` / `rhs_index` without changing comparison logic, execution order, benchmark results, or production solver. Also renamed the equally generic parameters in the residual-shaving hot-pair comparator to prevent future shadowing as that code evolves. | macOS replay had already passed; GCC 13 CI compilation of this correction and broader cross-platform results are pending. |
+
 ### Update protocol
 
 For every follow-up investigation: add a dated row to the
