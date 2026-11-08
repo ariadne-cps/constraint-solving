@@ -296,6 +296,29 @@ std::vector<TraceRecord> read_adaptive_trace(
     return result;
 }
 
+// A call is "changed" when its targeted interval differs from the input,
+// including certified emptiness. Unchanged calls are not necessarily
+// redundant: they may still be required to establish a validated result.
+struct BoxCallStatistics {
+    SizeType calls=0u;
+    SizeType evaluations=0u;
+    SizeType changed=0u;
+    SizeType unchanged=0u;
+    SizeType emptied=0u;
+    SizeType zero_evaluations=0u;
+    double seconds=0.0;
+
+    void add(SizeType n,Bool modified,Bool empty,double duration) {
+        ++calls;
+        evaluations+=n;
+        changed+=static_cast<SizeType>(modified);
+        unchanged+=static_cast<SizeType>(not modified);
+        emptied+=static_cast<SizeType>(empty);
+        zero_evaluations+=static_cast<SizeType>(n==0u);
+        seconds+=duration;
+    }
+};
+
 struct ReduceTraceStatistics {
     SizeType queries=0u;
     SizeType proven_empty=0u;
@@ -308,6 +331,28 @@ struct ReduceTraceStatistics {
     double hull_seconds=0.0;
     double box_seconds=0.0;
     double total_seconds=0.0;
+
+    BoxCallStatistics box_activity;
+    std::vector<BoxCallStatistics> by_output;
+    std::vector<BoxCallStatistics> by_variable;
+    std::vector<BoxCallStatistics> by_pair;
+
+    void prepare(SizeType outputs,SizeType variables) {
+        by_output.resize(outputs);
+        by_variable.resize(variables);
+        by_pair.resize(outputs*variables);
+    }
+    void record_box(SizeType output,SizeType variable,SizeType count,
+                    SizeType evaluations,Bool changed,Bool empty,
+                    double elapsed_seconds) {
+        box_activity.add(evaluations,changed,empty,elapsed_seconds);
+        by_output[output].add(
+            evaluations,changed,empty,elapsed_seconds);
+        by_variable[variable].add(
+            evaluations,changed,empty,elapsed_seconds);
+        by_pair[output*count+variable].add(
+            evaluations,changed,empty,elapsed_seconds);
+    }
 };
 
 void traced_reduce(ConstraintSolver const& solver,UpperBoxType& domain,
@@ -343,11 +388,22 @@ void traced_reduce(ConstraintSolver const& solver,UpperBoxType& domain,
         }
         for(SizeType i=0u;i<codomain.size();++i) {
             for(SizeType j=0u;j<domain.size();++j) {
+                // Use the solver's existing evaluation-count overload.
+                // Its numerical algorithm is identical to the four-argument
+                // overload used by production reduce().
+                UpperIntervalType before=domain[j];
+                SizeType function_evaluations=0u;
                 auto bstart=Clock::now();
                 ++stats.box_calls;
-                solver.box_reduce(domain,function[i],codomain[i],j);
-                stats.box_seconds+=elapsed(bstart);
-                if(definitely(domain.is_empty())) {
+                solver.box_reduce(
+                    domain,function[i],codomain[i],j,function_evaluations);
+                double seconds=elapsed(bstart);
+                stats.box_seconds+=seconds;
+                Bool empty=definitely(domain.is_empty());
+                stats.record_box(
+                    i,j,domain.size(),function_evaluations,
+                    not same(before,domain[j]),empty,seconds);
+                if(empty) {
                     ++stats.stopped_empty_box;
                     ++stats.proven_empty;
                     stats.total_seconds+=elapsed(start);
@@ -371,6 +427,7 @@ void profile_adaptive_trace(std::string const& prefix,
     std::vector<TraceRecord> records=read_adaptive_trace(prefix,shape);
     ConstraintSolver solver;
     ReduceTraceStatistics stats;
+    stats.prepare(problem.function.result_size(),problem.initial_domain.size());
     SizeType mismatch=0u;
     auto sweep_start=std::chrono::steady_clock::now();
     for(TraceRecord const& entry:records) {
@@ -398,6 +455,31 @@ void profile_adaptive_trace(std::string const& prefix,
        or stats.stopped_empty_hull+stats.stopped_empty_box+
           stats.stopped_threshold!=stats.queries)
         throw std::runtime_error("inconsistent solver trace counters");
+    auto const& a=stats.box_activity;
+    if(a.calls!=stats.box_calls
+       or a.changed+a.unchanged!=a.calls
+       or a.emptied>a.changed or a.zero_evaluations>a.calls)
+        throw std::runtime_error("inconsistent box contractor counters");
+    auto check_group=[&](std::vector<BoxCallStatistics> const& group) {
+        SizeType calls=0u,evals=0u,changed=0u,unchanged=0u;
+        SizeType emptied=0u,without_evaluation=0u;
+        for(BoxCallStatistics const& cell:group) {
+            calls+=cell.calls;
+            evals+=cell.evaluations;
+            changed+=cell.changed;
+            unchanged+=cell.unchanged;
+            emptied+=cell.emptied;
+            without_evaluation+=cell.zero_evaluations;
+        }
+        if(calls!=a.calls or evals!=a.evaluations
+           or changed!=a.changed or unchanged!=a.unchanged
+           or emptied!=a.emptied
+           or without_evaluation!=a.zero_evaluations)
+            throw std::runtime_error("inconsistent box group totals");
+    };
+    check_group(stats.by_output);
+    check_group(stats.by_variable);
+    check_group(stats.by_pair);
     std::cout<<"TRACE_VERIFIED shape="<<shape
              <<" d=4 f=3 queries="<<stats.queries
              <<" definitely_separated="<<stats.proven_empty
@@ -422,6 +504,85 @@ void profile_adaptive_trace(std::string const& prefix,
     std::cout<<"SOLVER_TRACE measures an instrumented diagnostic replay and"
                 " a separate uninstrumented oracle call per input;"
                 " it is NOT a direct timing of paving::separated().\n";
+
+    // The benchmark already verifies final-domain equivalence before
+    // reporting the activity counters. Slice evaluation counts are supplied
+    // by the production contractor, not estimated from a copy of its loop.
+    std::cout<<"BOX_ACTIVITY shape="<<shape
+             <<" calls="<<a.calls
+             <<" evaluations="<<a.evaluations
+             <<" changed="<<a.changed
+             <<" unchanged="<<a.unchanged
+             <<" proven_empty="<<a.emptied
+             <<" zero_evaluations="<<a.zero_evaluations
+             <<" evaluations_per_call="<<std::fixed<<std::setprecision(3)
+                 <<(a.calls?static_cast<double>(a.evaluations)/a.calls:0.0)
+             <<" changed_percent="
+                 <<(a.calls?100.0*static_cast<double>(a.changed)/a.calls:0.0)
+             <<" unchanged_percent="
+                 <<(a.calls?100.0*static_cast<double>(a.unchanged)/a.calls:0.0)
+             <<"\n";
+    std::cout<<"BOX_ACTIVITY changed means an interval was contracted"
+                " or proved empty; unchanged does NOT imply that a"
+                " call was safely skippable.\n";
+
+    std::cout<<std::string(118,'=')<<"\n"
+             <<std::left<<std::setw(19)<<"Shape"
+             <<std::setw(14)<<"Group"
+             <<std::right<<std::setw(6)<<"Index"
+             <<std::setw(13)<<"Calls"
+             <<std::setw(15)<<"Evaluations"
+             <<std::setw(13)<<"Changed"
+             <<std::setw(13)<<"Unchanged"
+             <<std::setw(12)<<"Empty"
+             <<std::setw(13)<<"Time (ms)"<<"\n"
+             <<std::string(118,'-')<<"\n";
+    auto row=[&](char const* group,SizeType index,BoxCallStatistics const& b) {
+        std::cout<<std::left<<std::setw(19)<<shape
+                 <<std::setw(14)<<group
+                 <<std::right<<std::setw(6)<<index
+                 <<std::setw(13)<<b.calls
+                 <<std::setw(15)<<b.evaluations
+                 <<std::setw(13)<<b.changed
+                 <<std::setw(13)<<b.unchanged
+                 <<std::setw(12)<<b.emptied
+                 <<std::fixed<<std::setprecision(3)
+                 <<std::setw(13)<<(1000.0*b.seconds)<<"\n";
+    };
+    for(SizeType i=0u;i<stats.by_output.size();++i) {
+        row(i<4u?"image-axis":"constraint",i,stats.by_output[i]);
+    }
+    std::cout<<std::string(118,'-')<<"\n";
+    for(SizeType j=0u;j<stats.by_variable.size();++j) {
+        row("variable",j,stats.by_variable[j]);
+    }
+    std::cout<<std::string(118,'=')<<"\n";
+
+    // Show the hottest output-variable pairs without producing 48 lines
+    // per shape. Group totals above remain exhaustive.
+    std::vector<SizeType> ranks;
+    ranks.reserve(stats.by_pair.size());
+    for(SizeType index=0u;index<stats.by_pair.size();++index)
+        ranks.push_back(index);
+    std::sort(ranks.begin(),ranks.end(),
+        [&](SizeType a,SizeType b) {
+            return stats.by_pair[a].seconds>stats.by_pair[b].seconds;
+        });
+    SizeType dimensions=stats.by_variable.size();
+    for(SizeType rank=0u;rank<std::min(SizeType(8u),ranks.size());++rank) {
+        SizeType index=ranks[rank];
+        BoxCallStatistics const& b=stats.by_pair[index];
+        std::cout<<"BOX_HOT_PAIR shape="<<shape
+                 <<" rank="<<(rank+1u)
+                 <<" output="<<(index/dimensions)
+                 <<" variable="<<(index%dimensions)
+                 <<" calls="<<b.calls
+                 <<" evaluations="<<b.evaluations
+                 <<" changed="<<b.changed
+                 <<" unchanged="<<b.unchanged
+                 <<" ms="<<std::fixed<<std::setprecision(4)
+                     <<1000.0*b.seconds<<"\n";
+    }
 }
 
 template<class T>
