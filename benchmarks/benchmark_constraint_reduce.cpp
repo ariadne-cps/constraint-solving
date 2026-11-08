@@ -706,7 +706,6 @@ Timing median_ms(Work&& work,Selection const& selection) {
 // Preparation and correctness checks are deliberately outside timed loops.
 void compare_contained_skip(Selection const& selection,
                             std::string const& shape) {
-    using Clock=std::chrono::steady_clock;
     SolverProblem problem=make_problem(shape);
     std::vector<TraceRecord> const trace=
         read_adaptive_trace(selection.trace_prefix,shape);

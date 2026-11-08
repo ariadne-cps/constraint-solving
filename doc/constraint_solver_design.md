@@ -260,8 +260,10 @@ an accepted production-`reduce()` optimization.
 **Status:** implemented in
 `benchmark_constraint_reduce.cpp` at commit
 [`a62046b`](https://github.com/ariadne-cps/constraint-solving/commit/a62046bb3f62f53cbebe851403ba844f80855766);
-**compile/runtime and speedup not yet independently confirmed
-from an operator run as of 2026-11-08**.
+**operator-verified on macOS Release, 2026-11-08:** all five adaptive
+traces passed exact final-domain and separation-bit checks; calibrated
+seven-sample medians show a speedup in every shape. The prototype
+remains diagnostic only, with no production solver changes.
 
 For output `i`, first evaluate a validated enclosure
 `apply(function[i], domain)`. If
@@ -372,6 +374,62 @@ The scalar benchmark stores precompiled procedures in
 `std::vector<ValidatedProcedure>`. Do not assume this is
 directly suitable for the vector hull API.
 
+### P1 measurement: certified-containment replay, 2026-11-08
+
+The operator compiled and executed the opt-in
+`--compare-contained-skip` benchmark on macOS Release with all five
+d4/f3 adaptive traces. The correctness-only run emitted
+`CONTAINED_SKIP_VERIFIED` for every shape. The subsequent timed run
+reverified exact final-domain equality against production
+`ConstraintSolver::reduce` **for every one of 9,167 queries**, plus
+agreement with all exported paving separation bits. Seven calibrated
+samples were taken for each independent whole-trace sweep, with
+`--min-sample-ms 12` and one iteration per measured sweep.
+
+| Shape | Baseline median (ms) | Guarded median (ms) | Speedup | Guard tests | New certificates | Reused certificates | Box calls saved | Box calls executed |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| aligned-box | 489.98808 | 51.74458 | 9.469x | 27924 | 27924 | 27924 | 223392 | 0 |
+| rotated-box | 586.77229 | 206.16996 | 2.846x | 28266 | 22732 | 22644 | 181504 | 21670 |
+| aligned-ellipsoid | 490.85296 | 354.58704 | 1.384x | 9082 | 4424 | 14208 | 74528 | 17617 |
+| rotated-ellipsoid | 769.07454 | 602.28217 | 1.277x | 9913 | 4108 | 19112 | 92880 | 22534 |
+| ball | 599.47400 | 431.18262 | 1.390x | 11521 | 5812 | 17344 | 92624 | 21720 |
+| **Total counters** | | | | **86706** | **65000** | **101232** | **664928** | **83541** |
+
+The new proof guard skips **88.84%** (664928/748469) of
+the original box calls in this workload, and still gives identical
+contracted boxes. The **geometric mean of the five per-shape median
+speed ratios is 2.313x**. The separate sweep timings sum to 2936.16
+and 1645.97 ms respectively; their ratio (1.784x) is a different,
+workload-weighted summary and is **not** the geometric mean.
+
+The aligned-box improvement is extreme because the containment
+guard proves all outputs for all relevant rounds, eliminating
+all box calls (the original 600 empty proofs came from hull
+contraction). Other geometries still perform many nonlinear
+box contractions. All timings are end-to-end **solver sweep**
+times on the trace workload, not timings of `paving::separated()`.
+Independent baseline and guarded measurements were taken in a fixed
+order, so their medians do not eliminate drift/thermal/order effects;
+a future benchmarking refinement can alternate order and report
+multiple repeat batches. The proof check itself is not free.
+
+**Design decision:** P1 is a promising optimization candidate,
+especially for the axis-aligned workloads. Do not claim a generic
+9.47x speedup or silently promote this prototype. Before promotion,
+add direct unit/regression coverage (strict interval containment,
+non-contained and nonlinear constraints, degenerate dimensions,
+repeated rounds, empty domains), compile on supported platforms,
+and measure against independent workloads. Keep current stopping
+policy and validated semantics.
+
+**Compiler hygiene:** the diagnostic comparison function contained
+an unused local type alias `using Clock=std::chrono::steady_clock;`
+(previously at benchmark line 709). Remove that alias only;
+the timing utility and traced replay still use their own
+`Clock` aliases. This fixes the source of the reported Clang
+unused-local-typedef warning but has **no runtime or algorithmic
+effect**; verify the warning disappears in the next local build.
+
 ## 5. Acceptance criteria for every experiment
 
 1. **Baseline fidelity:** The unmodified `reduce()` result
@@ -454,6 +512,7 @@ can be added for correctness-only replay.
 | 2026-11-08 | 748,469 box calls, 1,363,458 evaluations; 700,968 unchanged and 173,522 evaluation-free calls. Identity outputs account for ~53.9% of calls but no observed contractions. | Measured |
 | 2026-11-08 | Try per-query validated containment certificates before changing `reduce()`. Diagnostic-only variant at `a62046b`; no operator timing result yet. | Experiment implemented; evaluation pending |
 | 2026-11-08 | Plan dependency-filter, incremental agenda, adaptive ordering, and sound shaving search only after isolated correctness and cost studies. | Proposed; not authorized as production changes |
+| 2026-11-08 | macOS Release exact-domain replay passed 9,167 queries for certified-containment prototype; 664,928/748,469 box calls skipped, geometric-mean median speedup 2.313x (per shape 1.277-9.469x). Removed benchmark-only unused Clock alias warning. | Measured on adaptive paving traces; candidate for tested production promotion, not yet promoted |
 
 ### Update protocol
 
