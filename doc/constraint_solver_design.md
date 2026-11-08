@@ -795,6 +795,55 @@ Do not infer a statistically robust few-percent gain from
 the fixed-order unpaired medians, especially where there
 is no contractor work.
 
+#### Independent exact audit of rotated-ellipsoid extra empties
+
+A standalone Python standard-library auditor is available at
+`benchmarks/audit_rotated_ellipsoid.py`. This is **not** a shared
+benchmark/test header, nor a production solver change. The
+C++ `--compare-adaptive-shaving` replay now prints
+`ADAPTIVE_SHAVING_EXTRA_EMPTY` with the method and zero-based
+query index for each additional empty result.
+
+The auditor reads the original binary-double trace endpoints,
+converts each to an exact rational `Fraction`, and minimizes
+the *actual convex quadratic defining the rotated-ellipsoid*
+under the intersection of the query box with `[0,1]^4`.
+The squared shifted rotation term expands to
+`1168u^2 - 1152uv + 832v^2`, where `u=x0-1/2`,
+`v=x1-1/2`. Its Hessian is positive definite, and its
+minimum on a rectangle occurs at an interior stationary
+point, on an edge or at a corner. For the two other
+coordinates, minimizing `400(x2-1/2)^2 + 400(x3-1/2)^2`
+amounts to clamping each coordinate to `1/2`. Exact
+comparison of the resulting global minimum with `25`
+either proves that the queried geometry is empty, or
+constructs an exact rational feasible witness.
+
+The auditor compares each new C++ exclusion with the exact
+minimum, checks that the candidate-only ID count matches
+the benchmark summary, and independently checks that the
+original paving separation bits have no false positives.
+It emits `AUDIT_ELLIPSOID_QUERY` and
+`AUDIT_ELLIPSOID_SUMMARY`. To run:
+
+```sh
+git pull --ff-only
+cmake --build build-release --target benchmark_constraint_reduce
+python3 benchmarks/audit_rotated_ellipsoid.py --self-test
+python3 benchmarks/audit_rotated_ellipsoid.py \
+  --trace-prefix "$HOME/Downloads/traces/outer" \
+  --benchmark ./build-release/benchmarks/benchmark_constraint_reduce
+```
+
+**Important:** this is an *independent shape-specific
+ground-truth oracle* for rotated-ellipsoid, **not** a proof
+of soundness of the adaptive dyadic contractor on arbitrary
+functions or arbitrary-sized coordinates. If an excluded
+query has a true minimum at most 25, the auditor reports
+a feasible counterexample and exits unsuccessfully.
+Do not count the 28 claims as independently verified until
+this auditor is executed on the operator's actual traces.
+
 **Decision:** retain the memoization diagnostic for reuse
 studies but do not insert it into production. Before any
 further shaving redesign, independently audit the dyadic
@@ -1003,6 +1052,8 @@ can be added for correctness-only replay.
 | 2026-11-08 | Added per-box-call dyadic exclusion-decision cache with identical visit order and visit budget; opt-in benchmark reports verified domain equivalence to uncached adaptive shaving, cache hits, evaluation reduction and timed comparison including cache overhead. | Prototype committed; build and operator results pending |
 
 | 2026-11-08 | Adaptive dyadic per-box cache validated identical domains versus uncached on all 9,167 queries. Cache saves 107,878 evaluations (19.39%) for budget-8 and 146,144 (12.07%) for resolution; cache-only geomeans 1.124x and 1.107x. Relative to production: 1.016x and 0.662x, with the only major budget win on rotated-ellipsoid still weakening 324/1055 boxes. | Retain benchmark diagnostics, no production change; prioritize independent empty-proof audit and strength-preserving shaving |
+
+| 2026-11-08 | Added a shape-specific independent exact-arithmetic verifier for the 28 candidate-only rotated-ellipsoid empty results. The benchmark now emits candidate-only zero-based query indices; the Python auditor computes the exact convex quadratic minimum on every query box and checks baseline separation bits. | Auditor self-test passed in development; operator replay on actual traces and C++ rebuild pending |
 
 ### Update protocol
 

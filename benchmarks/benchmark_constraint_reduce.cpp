@@ -1706,6 +1706,14 @@ void compare_adaptive_shaving(Selection const& selection,
                         +" query="+std::to_string(q));
             }
             Bool const candidate_empty=definitely(candidate.is_empty());
+            // Provide query IDs for an independent exact-arithmetic
+            // audit of additional empty results on the convex benchmark
+            // geometry. This is diagnostic output, before timed sweeps.
+            if(candidate_empty and not empty) {
+                std::cout<<"ADAPTIVE_SHAVING_EXTRA_EMPTY shape="<<shape
+                         <<" method="<<labels[method]
+                         <<" query="<<q<<"\n";
+            }
             result.candidate_only_empty+=
                 static_cast<SizeType>(candidate_empty and not empty);
             result.production_only_empty+=
