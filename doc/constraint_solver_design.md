@@ -902,6 +902,19 @@ box is produced by exact convex interpolation if necessary.
 A minimum equal to 25 attained *strictly outside* is itself an
 exact feasible counterexample.
 
+**Empty-box handling:** the existing benchmark's coordinate-wise
+`refines(Box,Box)` classification can report `incomparable`
+when a contractor has already proved the box empty by reversing an
+interval, since it compares all coordinates rather than treating the
+box as the empty set. The new audit therefore keeps the original
+`incomparable` count for historical comparability, but reports
+`empty_box_cases`, `nonempty_incomparable`, and each method's
+empty-box count. It does not read invalid endpoints or run face
+analysis on empty boxes. If the exact query geometry is empty,
+both contractions are vacuously sound. If the geometry is feasible,
+an empty contractor result is an error with an exact feasible witness.
+Only nonempty contracted boxes undergo face analysis.
+
 The diagnostic distinguishes `geometry=EXACTLY_EMPTY`
 (vacuously sound) from `geometry=FEASIBLE`, and reports
 `production=SOUND` / `candidate=SOUND` or
@@ -926,9 +939,15 @@ cmake --build build-release --target benchmark_constraint_reduce
   --verify-only --concurrency 0
 ```
 
-**Validation status:** source added; complete build and operator replay
-on the 12 known incomparable resolution query boxes remain pending.
-Do not infer their soundness from the earlier 28-case emptiness audit.
+**Validation status:** the initial operator replay encountered an
+assertion after emitting the first six additional empty queries:
+`unexpected empty box in incomparable audit`. This was a defect in
+the diagnostic's assumption that every `incomparable` pair must
+contain two nonempty boxes, not a contractor counterexample.
+The diagnostic now handles empty results explicitly; a new build and
+operator replay are pending. The split of the 12 cases into empty-box
+artifacts and genuinely nonempty incomparable contractions remains
+unmeasured. Do not infer their soundness from the 28-case audit.
 
 **Decision:** retain the memoization diagnostic for reuse
 studies but do not insert it into production. The specific
@@ -1146,6 +1165,8 @@ can be added for correctness-only replay.
 | 2026-11-08 | Operator C++ exact-audit replay at `--trace-prefix "$HOME/Downloads/traces/outer"` verified rotated-ellipsoid d4/f3 (1,055 queries): 360 actually empty, production 296 sound separations, resolution 324 sound separations including 28/28 additional exact proofs (12 with Q=100, 16 with Q=2500/13), zero false positives; budget-8 296. Resolution contractions: 425 same, 618 stronger, 0 weaker, 12 incomparable; budget-8: 671 same, 24 stronger, 324 weaker, 36 incomparable. | Close the 28-case audit gap for this trace only; retain adaptive prototypes in benchmarks, no production promotion, analyze incomparable boxes and general soundness separately. |
 
 | 2026-11-08 | Added opt-in exact rational feasibility audit for the depth-8/cap-64 resolution candidate’s incomparable rotated-ellipsoid contractions. Checks every open excluded face for both P1 production and candidate, distinguishing vacuous empty geometry, sound but incomparable contractions, and constructive feasible-point loss (including exact threshold boundary handling). Added self-tests for tangent and strict-cut cases. | C++ build and replay of the 12 known incomparable cases pending; no production changes. |
+
+| 2026-11-08 | Corrected the optional incomparable-case audit after operator replay stopped at `unexpected empty box in incomparable audit` immediately following candidate-only empty results. Coordinate-wise `refines` may classify a represented empty box as incomparable. Separate empty-result artifacts from true nonempty incomparability, use exact query feasibility to assess empty contractions, and add self-tests. | New compile/replay pending; no contractor or production change. |
 
 ### Update protocol
 

@@ -563,15 +563,29 @@ BinaryBox exact_audit_box_endpoints(UpperBoxType const& domain) {
     return result;
 }
 
+// Coordinate-wise interval refines() need not model set inclusion when one
+// Box has a reversed interval (empty). Preserve the original comparison
+// counters, but classify empty results separately before reading endpoints.
 struct IncomparableAuditStatistics {
     SizeType cases=0u;
     SizeType empty_geometry=0u;
     SizeType feasible_geometry=0u;
+    SizeType empty_box_cases=0u;
+    SizeType nonempty_incomparable=0u;
+    SizeType production_empty_cases=0u;
+    SizeType candidate_empty_cases=0u;
     SizeType both_sound=0u;
     SizeType production_loss_cases=0u;
     SizeType candidate_loss_cases=0u;
     SizeType cut_faces_checked=0u;
 };
+
+bool exact_contraction_is_sound(bool box_empty,
+                                ExactEllipsoidMinimum const& geometry,
+                                ExactContractionAudit const& cut_audit) {
+    return geometry.empty() or
+        (not box_empty and cut_audit.lost_faces==0u);
+}
 
 void audit_resolution_incomparable_case(
         SizeType query_index,TraceRecord const& trace,
@@ -579,27 +593,45 @@ void audit_resolution_incomparable_case(
         UpperBoxType const& production,UpperBoxType const& candidate,
         IncomparableAuditStatistics& stats) {
     ++stats.cases;
-    BinaryBox const p=exact_audit_box_endpoints(production);
-    BinaryBox const c=exact_audit_box_endpoints(candidate);
+    bool const production_empty=definitely(production.is_empty());
+    bool const candidate_empty=definitely(candidate.is_empty());
+    stats.production_empty_cases+=static_cast<SizeType>(production_empty);
+    stats.candidate_empty_cases+=static_cast<SizeType>(candidate_empty);
+    bool const any_empty=production_empty or candidate_empty;
+    stats.empty_box_cases+=static_cast<SizeType>(any_empty);
+    stats.nonempty_incomparable+=static_cast<SizeType>(not any_empty);
+
+    // Never decode endpoints from an empty box. The surviving
+    // coordinates of a reversed-interval representation are irrelevant
+    // to the empty set and have no semantic "tighter face" meaning.
+    BinaryBox p{};
+    BinaryBox c{};
     SizeType candidate_tighter=0u;
     SizeType production_tighter=0u;
-    for(std::size_t j=0u;j<4u;++j) {
-        candidate_tighter+=static_cast<SizeType>(c[j].first>p[j].first);
-        candidate_tighter+=static_cast<SizeType>(c[j].second<p[j].second);
-        production_tighter+=static_cast<SizeType>(p[j].first>c[j].first);
-        production_tighter+=static_cast<SizeType>(p[j].second<c[j].second);
-        if(p[j]!=c[j]) {
-            std::ostringstream line;
-            line<<std::hexfloat
-                <<"AUDIT_INCOMPARABLE_FACE method=resolution query="<<query_index
-                <<" coordinate="<<j
-                <<" production=["<<p[j].first<<","<<p[j].second<<"]"
-                <<" candidate=["<<c[j].first<<","<<c[j].second<<"]";
-            std::cout<<line.str()<<"\n";
+    if(not any_empty) {
+        p=exact_audit_box_endpoints(production);
+        c=exact_audit_box_endpoints(candidate);
+        for(std::size_t j=0u;j<4u;++j) {
+            candidate_tighter+=static_cast<SizeType>(c[j].first>p[j].first);
+            candidate_tighter+=static_cast<SizeType>(c[j].second<p[j].second);
+            production_tighter+=static_cast<SizeType>(p[j].first>c[j].first);
+            production_tighter+=static_cast<SizeType>(p[j].second<c[j].second);
+            if(p[j]!=c[j]) {
+                std::ostringstream line;
+                line<<std::hexfloat
+                    <<"AUDIT_INCOMPARABLE_FACE method=resolution query="
+                    <<query_index
+                    <<" coordinate="<<j
+                    <<" production=["<<p[j].first<<","<<p[j].second<<"]"
+                    <<" candidate=["<<c[j].first<<","<<c[j].second<<"]";
+                std::cout<<line.str()<<"\n";
+            }
         }
     }
 
     std::cout<<"AUDIT_INCOMPARABLE_QUERY method=resolution query="<<query_index
+             <<" production_box="<<(production_empty?"EMPTY":"NONEMPTY")
+             <<" candidate_box="<<(candidate_empty?"EMPTY":"NONEMPTY")
              <<" candidate_tighter_faces="<<candidate_tighter
              <<" production_tighter_faces="<<production_tighter;
     if(geometry.empty()) {
@@ -610,13 +642,19 @@ void audit_resolution_incomparable_case(
     }
 
     ++stats.feasible_geometry;
-    ExactContractionAudit const pa=
-        audit_exact_ellipsoid_contraction(trace.endpoints,p);
-    ExactContractionAudit const ca=
-        audit_exact_ellipsoid_contraction(trace.endpoints,c);
+    if(not production_empty) p=exact_audit_box_endpoints(production);
+    if(not candidate_empty) c=exact_audit_box_endpoints(candidate);
+    ExactContractionAudit pa;
+    ExactContractionAudit ca;
+    if(not production_empty)
+        pa=audit_exact_ellipsoid_contraction(trace.endpoints,p);
+    if(not candidate_empty)
+        ca=audit_exact_ellipsoid_contraction(trace.endpoints,c);
     stats.cut_faces_checked+=pa.cut_faces+ca.cut_faces;
-    bool const production_ok=pa.lost_faces==0u;
-    bool const candidate_ok=ca.lost_faces==0u;
+    bool const production_ok=
+        exact_contraction_is_sound(production_empty,geometry,pa);
+    bool const candidate_ok=
+        exact_contraction_is_sound(candidate_empty,geometry,ca);
     stats.production_loss_cases+=static_cast<SizeType>(not production_ok);
     stats.candidate_loss_cases+=static_cast<SizeType>(not candidate_ok);
     stats.both_sound+=static_cast<SizeType>(production_ok and candidate_ok);
@@ -627,19 +665,31 @@ void audit_resolution_incomparable_case(
              <<" candidate_cut_faces="<<ca.cut_faces
              <<" production_lost_faces="<<pa.lost_faces
              <<" candidate_lost_faces="<<ca.lost_faces<<"\n";
-    auto print_loss=[&](char const* contractor,ExactContractionAudit const& a) {
+    auto print_loss=[&](char const* contractor,bool box_empty,
+                        ExactContractionAudit const& a) {
+        if(box_empty) {
+            // geometry.witness is an exact feasible point in the query.
+            std::cout<<"AUDIT_INCOMPARABLE_COUNTEREXAMPLE method=resolution"
+                     <<" query="<<query_index
+                     <<" contractor="<<contractor
+                     <<" reason=EMPTY_CONTRACTION_OF_FEASIBLE_GEOMETRY"
+                     <<" feasible_Q="<<geometry.minimum
+                     <<" feasible_point="<<exact_witness_string(geometry.witness)
+                     <<"\n";
+            return;
+        }
         if(a.lost_faces==0u) return;
         std::cout<<"AUDIT_INCOMPARABLE_COUNTEREXAMPLE method=resolution"
                  <<" query="<<query_index
                  <<" contractor="<<contractor
                  <<" coordinate="<<a.witness_coordinate
                  <<" side="<<(a.witness_below?"below":"above")
-                 <<" min_feasible_Q="<<a.witness_q
+                 <<" feasible_Q="<<a.witness_q
                  <<" feasible_point="<<exact_witness_string(a.witness)
                  <<"\n";
     };
-    print_loss("production",pa);
-    print_loss("candidate",ca);
+    if(not production_ok) print_loss("production",production_empty,pa);
+    if(not candidate_ok) print_loss("candidate",candidate_empty,ca);
 }
 
 void audit_rotated_ellipsoid_self_test() {
@@ -705,7 +755,18 @@ void audit_rotated_ellipsoid_self_test() {
        or cut.witness[2]!=ExactRational(1)/4)
         throw std::runtime_error(
             "ellipsoid audit self-test: strict outside tangent");
-    std::cout<<"AUDIT_ELLIPSOID_SELF_TEST_OK cases=12\n";
+    // Empty contracted domains are sound only for empty geometries,
+    // irrespective of the reversed-interval representation.
+    ExactContractionAudit const uncut;
+    if(exact_contraction_is_sound(true,
+           exact_rotated_ellipsoid_minimum(full),uncut)
+       or not exact_contraction_is_sound(true,
+           exact_rotated_ellipsoid_minimum(far),uncut)
+       or not exact_contraction_is_sound(false,
+           exact_rotated_ellipsoid_minimum(full),uncut))
+        throw std::runtime_error(
+            "ellipsoid audit self-test: empty contraction semantics");
+    std::cout<<"AUDIT_ELLIPSOID_SELF_TEST_OK cases=15\n";
 }
 
 struct EllipsoidAuditStatistics {
@@ -2140,10 +2201,6 @@ void compare_adaptive_shaving(Selection const& selection,
             } else {
                 ++result.incomparable;
                 if(selection.audit_resolution_incomparables and method==1u) {
-                    if(definitely(production.is_empty())
-                       or definitely(candidate.is_empty()))
-                        throw std::runtime_error(
-                            "unexpected empty box in incomparable audit");
                     audit_resolution_incomparable_case(
                         q,records[q],oracle[q],production,candidate,
                         incomparables);
@@ -2202,12 +2259,25 @@ void compare_adaptive_shaving(Selection const& selection,
         if(incomparables.cases!=comparisons[1].incomparable
            or incomparables.cases!=incomparables.empty_geometry
                                     +incomparables.feasible_geometry
-           or incomparables.both_sound>incomparables.feasible_geometry)
+           or incomparables.cases!=incomparables.empty_box_cases
+                                    +incomparables.nonempty_incomparable
+           or incomparables.both_sound>incomparables.feasible_geometry
+           or incomparables.production_empty_cases
+                        >incomparables.empty_box_cases
+           or incomparables.candidate_empty_cases
+                        >incomparables.empty_box_cases)
             throw std::runtime_error(
                 "inconsistent exact incomparable audit counters");
         std::cout<<"AUDIT_INCOMPARABLE_SUMMARY method=resolution"
                  <<" queries="<<records.size()
                  <<" incomparable="<<incomparables.cases
+                 <<" empty_box_cases="<<incomparables.empty_box_cases
+                 <<" nonempty_incomparable="
+                     <<incomparables.nonempty_incomparable
+                 <<" production_empty_cases="
+                     <<incomparables.production_empty_cases
+                 <<" candidate_empty_cases="
+                     <<incomparables.candidate_empty_cases
                  <<" empty_geometry="<<incomparables.empty_geometry
                  <<" feasible_geometry="<<incomparables.feasible_geometry
                  <<" both_sound="<<incomparables.both_sound
