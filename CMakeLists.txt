@@ -23,8 +23,6 @@ if(EXISTS "${PROJECT_SOURCE_DIR}/.git")
     # Compare direct occurrences; child commits guarantee internal consistency.
     require_same_dependency_commit(Build CHAINS
         "build" "nonlinear-programming|build" "testing|build")
-    require_same_dependency_commit(Testing CHAINS
-        "testing" "nonlinear-programming|testing")
 endif()
 
 setup_project()
