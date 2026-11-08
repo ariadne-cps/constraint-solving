@@ -85,7 +85,7 @@ void reduce_contained_skip(ConstraintSolver const& solver,
                 continue;
             }
             if(statistics) ++statistics->tests;
-            if(definitely(subset(apply(function[i],domain),codomain[i]))) {
+            if(definitely(subset(Ariadne::apply(function[i],domain),codomain[i]))) {
                 proved[i]=true;
                 if(statistics) {
                     ++statistics->certificates;

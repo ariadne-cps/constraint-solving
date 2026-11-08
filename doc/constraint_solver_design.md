@@ -292,8 +292,7 @@ against the unmodified production oracle. The new trace-free
 test exercises both variants on independent scalar, coupled 2D,
 and mixed 3D cases, including certified containment, boundary
 contact, reuse across rounds, degenerate and empty domains,
-and nonlinear shaving-dependent infeasibility. Test outcomes
-have not yet been confirmed by CI on the new commit.
+and nonlinear shaving-dependent infeasibility. The initial local macOS compilation failed because the unqualified `apply` selected `std::apply` (the test file imports `std`). The test-local copy now explicitly calls `Ariadne::apply` with unchanged numerical behavior. Compilation and test results after this correction are still pending.
 
 The prototype retains the original hull call, loop stopping
 threshold, and iteration structure. It compares full final
@@ -528,6 +527,8 @@ can be added for correctness-only replay.
 | 2026-11-08 | macOS Release exact-domain replay passed 9,167 queries for certified-containment prototype; 664,928/748,469 box calls skipped, geometric-mean median speedup 2.313x (per shape 1.277-9.469x). Removed benchmark-only unused Clock alias warning. | Measured on adaptive paving traces; candidate for tested production promotion, not yet promoted |
 
 | 2026-11-08 | Added trace-independent regression cases for certified containment, with a deliberate local copy of the benchmark algorithm in the unit-test file; no shared benchmark/test header or production change. | Tests submitted; compilation and execution pending |
+
+| 2026-11-08 | Fixed test-only `apply` lookup ambiguity with libc++ `std::apply` by qualifying `Ariadne::apply`; benchmark and production algorithm unchanged. | Correction committed; test rerun pending |
 
 ### Update protocol
 
