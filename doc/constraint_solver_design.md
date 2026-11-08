@@ -1502,6 +1502,19 @@ cmake --build build-release --target benchmark_constraint_reduce
   --samples 7 --min-sample-ms 12 --concurrency 0
 ```
 
+**Compiler correction (2026-11-08):** the first P6 benchmark version
+did not compile with AppleClang: it tried to construct
+`Vector<ValidatedProcedure>` directly from
+`ValidatedVectorMultivariateFunction`, but the public
+`Vector` API has no such constructor. The corrected benchmark
+uses the supported `Vector(n, generator)` constructor and
+explicitly constructs `ValidatedProcedure(function[i])` for
+each scalar output. This preserves the intended vector hull
+contractor call and avoids introducing a different scalar hull
+schedule. **The corrected benchmark has not yet been rebuilt
+or replayed by the operator**, so exact box equivalence and
+runtime claims remain pending.
+
 **Design decision:** even if procedure preparation proves faster,
 cross-query reuse would require an explicitly prepared function
 lifetime/interface and a review of ownership, compilation costs,
@@ -1513,6 +1526,8 @@ This experiment does *not* claim general correctness based only
 on the fixed replay traces.
 
 | 2026-11-08 | Added P6 benchmark-only reuse of precompiled vector hull procedures in P1: production rebuild-per-round vs compile once per query vs prepare once per function across all five d4/f3 paving traces. Exact final-box and exported separation equivalence required against both production and frozen full scan for every query. Numeric-style logging CLI report with per-shape medians, separate compilation median, five-shape geometric mean and workload-weighted totals. | Full C++ build and operator five-shape replay/timings pending; production and API unchanged, per-workload reuse requires explicitly prepared-function ownership. |
+
+| 2026-11-08 | Corrected the P6 benchmark compile failure from unsupported `Vector<ValidatedProcedure>(function)` construction (AppleClang errors at former lines 3090, 3106, 3152). Use the public indexed vector generator with explicit `ValidatedProcedure(function[i])` for each output, retaining vector hull scheduling. | Rebuild and five-shape exact-equality replay pending; no production changes. |
 
 ### Update protocol
 
