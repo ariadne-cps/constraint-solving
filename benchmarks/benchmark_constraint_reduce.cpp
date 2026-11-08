@@ -3177,7 +3177,7 @@ PreparedHullRow compare_precompiled_hull(
     Timing const build=median_ms([&]()->SizeType {
         Vector<ValidatedProcedure> const local(problem.function);
         keep_alive(local);
-        return local.size();
+        return local.result_size();
     },selection);
     row.p1_ms=p1.milliseconds;
     row.per_query_ms=per_query.milliseconds;

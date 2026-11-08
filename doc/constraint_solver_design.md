@@ -1521,6 +1521,17 @@ This retains the intended *vector* hull contractor and avoids
 per-output scalar hull replacement. **Compilation and replay of
 this corrected revision are not yet verified.**
 
+**Third compile correction (2026-11-08):** once the specialized
+vector constructor compiled, AppleClang identified an unrelated
+method-call error in P6's isolated constructor timing: the
+`Vector<Procedure<Y>>` specialization has
+`result_size()`, not `size()`. The benchmark now returns
+`local.result_size()` from that timing lambda. All member
+calls on `local`, `prepared` and `hull_procedure` inside P6
+were checked against the actual specialization declaration:
+this was the only invalid member call. A complete operator
+build and replay of the corrected revision remain pending.
+
 **Design decision:** even if procedure preparation proves faster,
 cross-query reuse would require an explicitly prepared function
 lifetime/interface and a review of ownership, compilation costs,
@@ -1536,6 +1547,8 @@ on the fixed replay traces.
 | 2026-11-08 | Corrected the P6 benchmark compile failure from unsupported `Vector<ValidatedProcedure>(function)` construction (AppleClang errors at former lines 3090, 3106, 3152). Use the public indexed vector generator with explicit `ValidatedProcedure(function[i])` for each output, retaining vector hull scheduling. | Rebuild and five-shape exact-equality replay pending; no production changes. |
 
 | 2026-11-08 | Fixed a second P6 AppleClang failure: generic `Vector(n,generator)` instantiates `UniformArray<ValidatedProcedure>` which lacks characteristics. The actual vector procedure is a specialized `Vector<Procedure<Y>>` declared in `function/procedure.hpp`; reordered benchmark includes to match production and restored its direct constructor from the vector-valued function. | New build and five-shape equivalence replay still pending; no solver changes. |
+
+| 2026-11-08 | Fixed P6's third AppleClang compile failure: a `Vector<ValidatedProcedure>` constructor-timing lambda called nonexistent `local.size()`. The specialized vector has `result_size()`, so it now returns `local.result_size()`. Audited all `local`/`prepared`/`hull_procedure` member calls in P6 against the specialized class declaration; no other invalid calls identified. | Complete build and five-shape verification/timing pending; production unchanged. |
 
 ### Update protocol
 
