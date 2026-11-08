@@ -510,10 +510,85 @@ cmake --build build-release --target benchmark_constraint_reduce
   --profile-residual-shaving --concurrency 0
 ```
 
-Only after this breakdown should we choose between
-evaluation caching, different slice scheduling, validated
-monotonicity checks, or hierarchical interval subdivision.
-Each alternative must be shown sound and benchmarked separately.
+The first operator-provided `RESIDUAL_SHAVING_VERIFIED`
+summary shows the following **post-P1** activity:
+
+| Shape | Residual box calls | Interval evaluations | Evaluations per call | Contracting calls | Unchanged calls |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| aligned-box | 0 | 0 | n/a | 0 | 0 |
+| rotated-box | 21670 | 48000 | 2.215 | 3540 | 18130 |
+| aligned-ellipsoid | 17617 | 91644 | 5.202 | 11351 | 6266 |
+| rotated-ellipsoid | 22534 | 107526 | 4.772 | 19082 | 3452 |
+| ball | 21720 | 110412 | 5.083 | 13528 | 8192 |
+
+All 9,167 query results passed the replay equivalence checks.
+These summary figures alone do **not** give the 0–8 evaluation
+histograms. The fractions of costly unchanged calls and the
+relative cost of each output-coordinate pair remain unknown
+until the full profiler output is supplied.
+
+#### P5 adaptive subdivision experiment (benchmark-only)
+
+The eight-slice ceiling in production is heuristic: it is an
+**interval-grid resolution**, not eight mandatory evaluations.
+The existing contractor already stops each boundary scan at
+the first undecidable slice. The new
+`--compare-adaptive-shaving` benchmark explores a dyadic
+boundary subdivision tree instead of a fixed eight-cell grid.
+A cell is eliminated **only after a validated disjointness
+proof**; inconclusive cells are subdivided until a leaf at
+the configured resolution or an evaluation budget is reached.
+An unproved leaf is never removed. The left and right boundary
+passes each receive approximately half the evaluation budget,
+ensuring a bounded amount of work on both sides.
+
+Two independently calibrated experiments are compared with
+production P1, on the same d4/f3 trace inputs:
+
+- `method=budget`: total eight evaluations per
+  `box_reduce` call and maximum dyadic depth eight;
+- `method=resolution`: a provisional 64-evaluation ceiling
+  with maximum dyadic depth eight (a nominal relative grid
+  resolution of 1/256 of the original coordinate width).
+
+These values are **configurable experimental parameters**,
+not recommended defaults: `--adaptive-depth`,
+`--adaptive-budget`, and
+`--adaptive-resolution-budget`. Different adaptive
+contractions can be stronger, weaker, or incomparable with
+the current eight-slice contractor. Therefore correctness
+cannot be defined by *equality* with production. The
+benchmark checks that each candidate remains inside its
+initial domain, preserves independently certified feasible
+centre witnesses, and every discarded cell has a validated
+proof of disjointness. It compares candidate/baseline domain
+relations and separate certified separation bits, but does
+not require them to match.
+
+The benchmark reports `ADAPTIVE_SHAVING_VERIFIED` for each
+shape/method (domain-strength relation, rejection differences,
+feasible witness checks, evaluations, and budget/depth stops)
+and `ADAPTIVE_SHAVING_COMPARE` for seven-sample calibrated
+median timings. Production and the frozen pre-P1 full-scan
+reference must still agree **exactly** on every trace query.
+
+```sh
+cmake --build build-release --target benchmark_constraint_reduce
+./build-release/benchmarks/benchmark_constraint_reduce \
+  --trace-prefix "$HOME/Downloads/traces/outer" \
+  --compare-adaptive-shaving --verify-only --concurrency 0
+./build-release/benchmarks/benchmark_constraint_reduce \
+  --trace-prefix "$HOME/Downloads/traces/outer" \
+  --compare-adaptive-shaving --samples 7 --concurrency 0
+```
+
+Do **not** promote an adaptive variant merely because its
+loop is cheaper. Its contraction strength, certified
+separation count, and feasible-witness preservation are
+coequal acceptance criteria, and its evaluation budget is
+part of the algorithm's practical semantics. Changing the
+production contractor requires additional unit tests with
+adversarial interval cases and independent workloads.
 
 `box_reduce` currently scans up to eight lower slices and
 the remaining upper slices. Adaptive slice counts, reuse of
@@ -695,6 +770,8 @@ can be added for correctness-only replay.
 | 2026-11-08 | P2 replay validated identical final domains and certified separations on 9,167 queries; only rotated-box skipped 10,756 more box calls. Geometric-mean speedups were 1.032x prepared and 0.883x rebuilt per query. | Reject general per-call dependency compilation; retain P2 diagnostic and profile residual nonlinear shaving next |
 
 | 2026-11-08 | Added opt-in P1-residual shaving profiler: 0–8 box evaluation histograms, unchanged-cost histogram, output/variable hot pairs and guard/hull/box timing. Verify every final box against production and frozen full scan. | Diagnostic implementation committed; correctness and measured results pending |
+
+| 2026-11-08 | Add benchmark-only adaptive dyadic boundary shaving prototypes: 8-evaluation budget versus depth-limited resolution with a higher cap, validated disjointness proofs, and measurement of contraction-strength changes relative to current P1. | Experiment implemented; compile, independent correctness checks, and timings pending |
 
 ### Update protocol
 

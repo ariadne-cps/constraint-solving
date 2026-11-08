@@ -48,6 +48,10 @@ struct Selection {
     Bool compare_contained_skip=false;
     Bool compare_dependency_skip=false;
     Bool profile_residual_shaving=false;
+    Bool compare_adaptive_shaving=false;
+    unsigned adaptive_depth=8u;
+    unsigned adaptive_budget=8u;
+    unsigned adaptive_resolution_budget=64u;
     std::string trace_prefix;
 };
 
@@ -94,6 +98,10 @@ void print_usage(char const* program) {
              <<"  --compare-contained-skip   Compare legacy full scan vs production\n"
              <<"  --compare-dependency-skip  Try static procedure-dependency shaving\n"
              <<"  --profile-residual-shaving Profile P1 surviving box calls (0..8 evals)\n"
+             <<"  --compare-adaptive-shaving Compare 8-slice vs adaptive shaving\n"
+             <<"  --adaptive-depth N         Maximum dyadic depth (1..12; default 8)\n"
+             <<"  --adaptive-budget N        Tight evaluation budget (>=2; default 8)\n"
+             <<"  --adaptive-resolution-budget N Evaluation cap for depth-limited mode (default 64)\n"
              <<"  --verify-only              Validate without timing\n"
              <<"  -h, --help                 Print this help\n";
 }
@@ -121,6 +129,10 @@ Bool parse_arguments(int argc,char const* argv[],Selection& selection) {
             selection.profile_residual_shaving=true;
             continue;
         }
+        if(argument=="--compare-adaptive-shaving") {
+            selection.compare_adaptive_shaving=true;
+            continue;
+        }
         if(i+1>=argc) {
             throw std::invalid_argument("missing value for "+argument);
         }
@@ -142,6 +154,22 @@ Bool parse_arguments(int argc,char const* argv[],Selection& selection) {
             if(number==0u)
                 throw std::invalid_argument("max-iterations must be positive");
             selection.max_iterations=number;
+        } else if(argument=="--adaptive-depth") {
+            unsigned depth=unsigned_argument(value);
+            if(depth<1u or depth>12u)
+                throw std::invalid_argument("adaptive-depth must be in 1..12");
+            selection.adaptive_depth=depth;
+        } else if(argument=="--adaptive-budget") {
+            unsigned budget=unsigned_argument(value);
+            if(budget<2u or budget>4096u)
+                throw std::invalid_argument("adaptive-budget must be in 2..4096");
+            selection.adaptive_budget=budget;
+        } else if(argument=="--adaptive-resolution-budget") {
+            unsigned budget=unsigned_argument(value);
+            if(budget<2u or budget>4096u)
+                throw std::invalid_argument(
+                    "adaptive-resolution-budget must be in 2..4096");
+            selection.adaptive_resolution_budget=budget;
         } else if(argument=="--trace-prefix") {
             if(value.empty())
                 throw std::invalid_argument("trace prefix must not be empty");
@@ -1392,6 +1420,346 @@ void profile_residual_shaving(Selection const& selection,
                 " legacy reference was checked for every query.\n";
 }
 
+// P5, benchmark-only: a sound boundary contractor using a dyadic
+// subdivision tree rather than the production eight equal slices.
+// Every removed prefix/suffix consists entirely of cells for which a
+// validated interval image is certified disjoint from the codomain.
+// An inconclusive leaf is NEVER removed; bisection only refines it.
+struct AdaptiveShavingSettings {
+    unsigned max_depth;
+    unsigned evaluation_budget;
+};
+
+struct AdaptiveShavingStatistics {
+    SizeType calls=0u;
+    SizeType evaluations=0u;
+    SizeType changed_calls=0u;
+    SizeType emptied_calls=0u;
+    SizeType rejected_cells=0u;
+    SizeType unresolved_leaves=0u;
+    SizeType budget_stops=0u;
+    SizeType depth_stops=0u;
+    SizeType certified_outputs=0u;
+    SizeType rounds=0u;
+};
+
+Bool adaptive_box_reduce(UpperBoxType& domain,
+                         ValidatedScalarMultivariateFunction const& function,
+                         ExactIntervalType const& bounds,SizeType variable,
+                         AdaptiveShavingSettings const& settings,
+                         AdaptiveShavingStatistics* stats=nullptr) {
+    if(stats) ++stats->calls;
+    if(definitely(domain.is_empty())) return true;
+    if(definitely(domain[variable].lower_bound()
+                  >=domain[variable].upper_bound())) return false;
+
+    UpperIntervalType const original=domain[variable];
+    FloatDPApproximation const lower=original.lower_bound();
+    FloatDPApproximation const upper=original.upper_bound();
+    UpperIntervalType narrowed=original;
+    struct Cell { unsigned depth; unsigned index; };
+    SizeType evaluations=0u;
+    bool entire_domain_excluded=false;
+
+    auto scan=[&](bool from_lower,unsigned budget)->bool {
+        std::vector<Cell> todo({Cell{0u,0u}});
+        bool unresolved=false;
+        unsigned used=0u;
+        while(not todo.empty() and used<budget) {
+            Cell const cell=todo.back();
+            todo.pop_back();
+            Nat const parts=static_cast<Nat>(1u<<cell.depth);
+            Nat const index=static_cast<Nat>(cell.index);
+            ExactIntervalType const interval(
+                cast_exact(affine(lower,upper,index,parts)),
+                cast_exact(affine(lower,upper,index+1u,parts)));
+            UpperBoxType slice=domain;
+            slice[variable]=interval;
+            ++used;
+            ++evaluations;
+            if(stats) ++stats->evaluations;
+            if(definitely(disjoint(
+                    Ariadne::apply(function,slice),bounds))) {
+                if(stats) ++stats->rejected_cells;
+                if(from_lower) {
+                    narrowed.set_lower_bound(interval.upper_bound());
+                } else {
+                    narrowed.set_upper_bound(interval.lower_bound());
+                }
+                continue;
+            }
+            if(cell.depth<settings.max_depth) {
+                unsigned const child_depth=cell.depth+1u;
+                unsigned const first=cell.index*2u;
+                // The last appended cell is processed first, preserving
+                // contiguous left-to-right or right-to-left exploration.
+                if(from_lower) {
+                    todo.push_back({child_depth,first+1u});
+                    todo.push_back({child_depth,first});
+                } else {
+                    todo.push_back({child_depth,first});
+                    todo.push_back({child_depth,first+1u});
+                }
+            } else {
+                unresolved=true;
+                if(stats) {
+                    ++stats->unresolved_leaves;
+                    ++stats->depth_stops;
+                }
+                break;
+            }
+        }
+        if(not todo.empty() and used==budget and stats)
+            ++stats->budget_stops;
+        // No unresolved leaf and nothing left on the stack means
+        // the entire original interval has been certified excluded.
+        return not unresolved and todo.empty();
+    };
+
+    // A symmetric budget ensures neither boundary starves the other.
+    unsigned const left_budget=(settings.evaluation_budget+1u)/2u;
+    unsigned const right_budget=settings.evaluation_budget-left_budget;
+    entire_domain_excluded=scan(true,left_budget);
+    if(not entire_domain_excluded)
+        entire_domain_excluded=scan(false,right_budget);
+
+    if(entire_domain_excluded or definitely(narrowed.is_empty())) {
+        domain[variable]=ExactIntervalType(+inf,-inf);
+        if(stats) {
+            ++stats->changed_calls;
+            ++stats->emptied_calls;
+        }
+        return true;
+    }
+    domain[variable]=narrowed;
+    if(stats and not same(original,narrowed))
+        ++stats->changed_calls;
+    return false;
+}
+
+Bool reduce_adaptive_shaving(
+        ConstraintSolver const& solver,UpperBoxType& domain,
+        ValidatedVectorMultivariateFunction const& function,
+        ExactBoxType const& codomain,
+        AdaptiveShavingSettings const& settings,
+        AdaptiveShavingStatistics* stats=nullptr) {
+    const ExactDouble MINIMUM_REDUCTION=0.75_x;
+    if(definitely(domain.is_empty())) return true;
+    std::vector<Bool> certified(codomain.size(),false);
+    FloatDPUpperBound magnitude={0u,dp};
+    for(SizeType j=0u;j<domain.size();++j)
+        magnitude+=domain[j].width();
+    FloatDPUpperBound previous=magnitude;
+
+    do {
+        if(stats) ++stats->rounds;
+        solver.hull_reduce(domain,function,codomain);
+        if(definitely(domain.is_empty())) return true;
+        for(SizeType i=0u;i<codomain.size();++i) {
+            if(certified[i]) continue;
+            if(definitely(subset(
+                    Ariadne::apply(function[i],domain),codomain[i]))) {
+                certified[i]=true;
+                if(stats) ++stats->certified_outputs;
+                continue;
+            }
+            for(SizeType j=0u;j<domain.size();++j) {
+                if(adaptive_box_reduce(
+                        domain,function[i],codomain[i],j,settings,stats))
+                    return true;
+            }
+        }
+        previous=magnitude;
+        magnitude=0u;
+        for(SizeType j=0u;j<domain.size();++j)
+            magnitude+=domain[j].width();
+    } while(magnitude.raw()
+            < mul(near,previous.raw(),FloatDP(MINIMUM_REDUCTION,dp)));
+    return false;
+}
+
+struct AdaptiveComparison {
+    SizeType exactly_same=0u;
+    SizeType stronger=0u;
+    SizeType weaker=0u;
+    SizeType incomparable=0u;
+    SizeType candidate_only_empty=0u;
+    SizeType production_only_empty=0u;
+    SizeType both_empty=0u;
+    SizeType feasible_witnesses=0u;
+    AdaptiveShavingStatistics activity;
+};
+
+void compare_adaptive_shaving(Selection const& selection,
+                              std::string const& shape) {
+    SolverProblem problem=make_problem(shape);
+    auto const records=read_adaptive_trace(selection.trace_prefix,shape);
+    std::vector<ExactBoxType> codomains;
+    codomains.reserve(records.size());
+    for(auto const& record:records) {
+        ExactBoxType codomain=problem.codomains.front();
+        for(SizeType i=0u;i<4u;++i) codomain[i]=record.box[i];
+        codomains.push_back(std::move(codomain));
+    }
+
+    ConstraintSolver solver;
+    AdaptiveShavingSettings const settings[]={
+        {selection.adaptive_depth,selection.adaptive_budget},
+        {selection.adaptive_depth,selection.adaptive_resolution_budget}
+    };
+    char const* labels[]={"budget","resolution"};
+    AdaptiveComparison comparisons[2];
+    SizeType production_separated=0u;
+    for(SizeType q=0u;q<records.size();++q) {
+        UpperBoxType production=problem.initial_domain;
+        solver.reduce(production,problem.function,codomains[q]);
+        UpperBoxType legacy=problem.initial_domain;
+        reduce_full_scan_reference(solver,legacy,problem.function,codomains[q]);
+        if(not same(production,legacy))
+            throw std::runtime_error(
+                "production differs from frozen full-scan"
+                " shape="+shape+" query="+std::to_string(q));
+        Bool const empty=definitely(production.is_empty());
+        if(empty!=records[q].separated)
+            throw std::runtime_error(
+                "baseline differs from exported paving separation"
+                " shape="+shape+" query="+std::to_string(q));
+        production_separated+=static_cast<SizeType>(empty);
+
+        // The centre is a known feasible point of all five geometries,
+        // but is a witness for this *query* only if validated evaluation
+        // proves its entire image lies within the query codomain.
+        UpperBoxType const witness=ExactBoxType({
+            {0.5_x,0.5_x},{0.5_x,0.5_x},
+            {0.5_x,0.5_x},{0.5_x,0.5_x}
+        });
+        bool verified_witness=true;
+        for(SizeType i=0u;i<codomains[q].size();++i) {
+            if(not definitely(subset(
+                    Ariadne::apply(problem.function[i],witness),
+                    codomains[q][i]))) {
+                verified_witness=false;
+                break;
+            }
+        }
+
+        for(unsigned method=0u;method!=2u;++method) {
+            AdaptiveComparison& result=comparisons[method];
+            UpperBoxType candidate=problem.initial_domain;
+            reduce_adaptive_shaving(
+                solver,candidate,problem.function,codomains[q],
+                settings[method],&result.activity);
+            if(not definitely(refines(candidate,problem.initial_domain)))
+                throw std::runtime_error(
+                    "adaptive contractor enlarged its initial domain"
+                    " shape="+shape+" method="+labels[method]
+                    +" query="+std::to_string(q));
+            if(verified_witness) {
+                ++result.feasible_witnesses;
+                if(definitely(disjoint(candidate,witness)))
+                    throw std::runtime_error(
+                        "adaptive contractor lost a certified feasible witness"
+                        " shape="+shape+" method="+labels[method]
+                        +" query="+std::to_string(q));
+            }
+            Bool const candidate_empty=definitely(candidate.is_empty());
+            result.candidate_only_empty+=
+                static_cast<SizeType>(candidate_empty and not empty);
+            result.production_only_empty+=
+                static_cast<SizeType>(not candidate_empty and empty);
+            result.both_empty+=
+                static_cast<SizeType>(candidate_empty and empty);
+            if(same(candidate,production)) {
+                ++result.exactly_same;
+            } else if(definitely(refines(candidate,production))) {
+                ++result.stronger;
+            } else if(definitely(refines(production,candidate))) {
+                ++result.weaker;
+            } else {
+                ++result.incomparable;
+            }
+        }
+    }
+
+    for(unsigned method=0u;method!=2u;++method) {
+        auto const& result=comparisons[method];
+        auto const& stats=result.activity;
+        if(result.exactly_same+result.stronger+result.weaker
+           +result.incomparable!=records.size())
+            throw std::runtime_error("inconsistent adaptive comparison counters");
+        if(stats.evaluations>stats.calls*
+                static_cast<SizeType>(settings[method].evaluation_budget))
+            throw std::runtime_error("adaptive shaving exceeded per-call budget");
+        std::cout<<"ADAPTIVE_SHAVING_VERIFIED shape="<<shape
+                 <<" method="<<labels[method]
+                 <<" queries="<<records.size()
+                 <<" baseline_separated="<<production_separated
+                 <<" exactly_same="<<result.exactly_same
+                 <<" stronger="<<result.stronger
+                 <<" weaker="<<result.weaker
+                 <<" incomparable="<<result.incomparable
+                 <<" candidate_only_empty="<<result.candidate_only_empty
+                 <<" production_only_empty="<<result.production_only_empty
+                 <<" both_empty="<<result.both_empty
+                 <<" certified_witnesses="<<result.feasible_witnesses
+                 <<" box_calls="<<stats.calls
+                 <<" box_evaluations="<<stats.evaluations
+                 <<" changed_box_calls="<<stats.changed_calls
+                 <<" excluded_cells="<<stats.rejected_cells
+                 <<" depth_stops="<<stats.depth_stops
+                 <<" budget_stops="<<stats.budget_stops
+                 <<" max_depth="<<settings[method].max_depth
+                 <<" evaluation_budget="<<settings[method].evaluation_budget
+                 <<"\n";
+    }
+    if(selection.verify_only) return;
+
+    auto production_work=[&] {
+        SizeType result=0u;
+        for(auto const& codomain:codomains) {
+            UpperBoxType domain=problem.initial_domain;
+            solver.reduce(domain,problem.function,codomain);
+            result+=static_cast<SizeType>(definitely(domain.is_empty()));
+            keep_alive(domain);
+        }
+        return result;
+    };
+    Timing const baseline=median_ms(production_work,selection);
+    for(unsigned method=0u;method!=2u;++method) {
+        auto adaptive_work=[&] {
+            SizeType result=0u;
+            for(auto const& codomain:codomains) {
+                UpperBoxType domain=problem.initial_domain;
+                reduce_adaptive_shaving(
+                    solver,domain,problem.function,codomain,settings[method]);
+                result+=static_cast<SizeType>(definitely(domain.is_empty()));
+                keep_alive(domain);
+            }
+            return result;
+        };
+        Timing const adaptive=median_ms(adaptive_work,selection);
+        double const ratio=baseline.milliseconds/adaptive.milliseconds;
+        if(not std::isfinite(ratio) or ratio<=0.0)
+            throw std::runtime_error("invalid adaptive shaving speed ratio");
+        std::cout<<"ADAPTIVE_SHAVING_COMPARE shape="<<shape
+                 <<" method="<<labels[method]
+                 <<" production_median_ms="<<std::fixed<<std::setprecision(5)
+                    <<baseline.milliseconds
+                 <<" adaptive_median_ms="<<adaptive.milliseconds
+                 <<" speedup="<<std::setprecision(3)<<ratio
+                 <<" samples="<<selection.samples
+                 <<" production_iters="<<baseline.iterations
+                 <<" adaptive_iters="<<adaptive.iterations
+                 <<"\n";
+    }
+    std::cout<<"ADAPTIVE_SHAVING_NOTE: candidate reductions are allowed to"
+                " differ from production; no equality or paving separation"
+                " assumption is imposed on the adaptive variants."
+                " Every excluded interval has a validated disjointness proof."
+                " Witness checks are restricted to certified feasible points."
+                " Only benchmark code changed.\n";
+}
+
 struct Datum {
     std::string shape;
     std::string operation;
@@ -1639,7 +2007,8 @@ int main(int argc,char const* argv[]) {
         unsigned const modes=
             static_cast<unsigned>(selection.compare_contained_skip)
             +static_cast<unsigned>(selection.compare_dependency_skip)
-            +static_cast<unsigned>(selection.profile_residual_shaving);
+            +static_cast<unsigned>(selection.profile_residual_shaving)
+            +static_cast<unsigned>(selection.compare_adaptive_shaving);
         if(modes>1u)
             throw std::invalid_argument(
                 "comparison and profiling modes are mutually exclusive");
@@ -1651,6 +2020,8 @@ int main(int argc,char const* argv[]) {
                     compare_dependency_skip(selection,shape);
                 } else if(selection.profile_residual_shaving) {
                     profile_residual_shaving(selection,shape);
+                } else if(selection.compare_adaptive_shaving) {
+                    compare_adaptive_shaving(selection,shape);
                 } else {
                     profile_adaptive_trace(
                         selection.trace_prefix,shape,selection.verify_only);
