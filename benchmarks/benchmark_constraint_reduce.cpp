@@ -5,10 +5,12 @@
  *  This file is part of Ariadne Constraint Solving, GPL-3.0-or-later.
  ***************************************************************************/
 
+// The Vector<Procedure<Y>> specialization must be visible before
+// constraint_solver.hpp or any use of Vector<ValidatedProcedure>.
+#include "function/procedure.hpp"
 #include "constraint-solving/constraint_solver.hpp"
 #include "function/function.hpp"
 #include "function/constraint.hpp"
-#include "function/procedure.hpp"
 #include "geometry/box.hpp"
 #include "foundation/logical.hpp"
 #include "logging/logging.hpp"
@@ -2996,23 +2998,11 @@ void print_hybrid_report(
         <<" These are separate calibrated sweeps, not paired timings.")
 }
 
-// P6 (benchmark only): hold the vector hull procedure constant instead of
-// rebuilding it on every iteration of the P1 hull/box reduction loop.
-// This changes no contractor order, proof test, or stopping rule.
-// Vector<ValidatedProcedure> does not accept a vector-valued Function
-// directly: construct it through the supported indexed generator API,
-// explicitly compiling a validated scalar Procedure for each output.
-// This avoids default construction (not supported by Procedure).
-Vector<ValidatedProcedure> compile_vector_hull_procedures(
-        ValidatedVectorMultivariateFunction const& function) {
-    if(function.result_size()==0u)
-        throw std::invalid_argument("cannot compile an empty vector hull");
-    return Vector<ValidatedProcedure>(
-        function.result_size(),
-        [&function](SizeType i)->ValidatedProcedure {
-            return ValidatedProcedure(function[i]);
-        });
-}
+// P6 (benchmark only): cache the same specialized vector procedure used
+// in production. function/procedure.hpp defines Vector<Procedure<Y>>
+// with a constructor taking VectorMultivariateFunction directly and
+// a shared instruction graph (not the generic UniformArray container).
+// That specialization must be included before constraint_solver.hpp.
 struct PreparedHullStatistics {
     SizeType calls=0u;
     SizeType hull_rounds=0u;
@@ -3099,7 +3089,7 @@ PreparedHullRow compare_precompiled_hull(
     ConstraintSolver solver;
     // Prepared-function lifetime covers all queries in this benchmark
     // workload. No procedures cross function/shape/precision boundaries.
-    Vector<ValidatedProcedure> const prepared=compile_vector_hull_procedures(problem.function);
+    Vector<ValidatedProcedure> const prepared(problem.function);
     PreparedHullRow row;
     row.shape=shape;
     row.queries=trace.size();
@@ -3115,7 +3105,7 @@ PreparedHullRow compare_precompiled_hull(
                 +shape+" query="+std::to_string(q));
 
         UpperBoxType per_query=problem.initial_domain;
-        Vector<ValidatedProcedure> const local=compile_vector_hull_procedures(problem.function);
+        Vector<ValidatedProcedure> const local(problem.function);
         reduce_with_precompiled_hull(
             solver,per_query,problem.function,codomain,local);
         UpperBoxType precompiled=problem.initial_domain;
@@ -3161,7 +3151,7 @@ PreparedHullRow compare_precompiled_hull(
             if(variant==0u) {
                 solver.reduce(domain,problem.function,codomain);
             } else if(variant==1u) {
-                Vector<ValidatedProcedure> const local=compile_vector_hull_procedures(problem.function);
+                Vector<ValidatedProcedure> const local(problem.function);
                 reduce_with_precompiled_hull(
                     solver,domain,problem.function,codomain,local);
             } else {
@@ -3185,7 +3175,7 @@ PreparedHullRow compare_precompiled_hull(
     // A separate calibrated one-off constructor estimate: never silently
     // equate the warmed prepared benchmark with end-to-end cold startup.
     Timing const build=median_ms([&]()->SizeType {
-        Vector<ValidatedProcedure> const local=compile_vector_hull_procedures(problem.function);
+        Vector<ValidatedProcedure> const local(problem.function);
         keep_alive(local);
         return local.size();
     },selection);

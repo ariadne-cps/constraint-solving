@@ -1502,18 +1502,24 @@ cmake --build build-release --target benchmark_constraint_reduce
   --samples 7 --min-sample-ms 12 --concurrency 0
 ```
 
-**Compiler correction (2026-11-08):** the first P6 benchmark version
-did not compile with AppleClang: it tried to construct
-`Vector<ValidatedProcedure>` directly from
-`ValidatedVectorMultivariateFunction`, but the public
-`Vector` API has no such constructor. The corrected benchmark
-uses the supported `Vector(n, generator)` constructor and
-explicitly constructs `ValidatedProcedure(function[i])` for
-each scalar output. This preserves the intended vector hull
-contractor call and avoids introducing a different scalar hull
-schedule. **The corrected benchmark has not yet been rebuilt
-or replayed by the operator**, so exact box equivalence and
-runtime claims remain pending.
+**Compiler diagnosis and correction (2026-11-08):** two attempted
+P6 constructions failed under AppleClang. The original direct
+`Vector<ValidatedProcedure>(function)` construction bound to the
+**generic** `Vector` template because the benchmark included
+`constraint_solver.hpp` before `function/procedure.hpp`. The
+subsequent attempt with `Vector(n, generator)` also instantiated
+the generic `UniformArray`, which requires unavailable
+`ValidatedProcedure` characteristics. The dependency's
+`function/procedure.hpp` explicitly defines the specialized
+`Vector<Procedure<Y>>` with a constructor accepting a
+`VectorMultivariateFunction`, using a shared instruction graph.
+As in production `constraint_solver.cpp`, the benchmark now
+includes `function/procedure.hpp` **before**
+`constraint_solver.hpp` and directly constructs
+`Vector<ValidatedProcedure>(function)` to use that specialization.
+This retains the intended *vector* hull contractor and avoids
+per-output scalar hull replacement. **Compilation and replay of
+this corrected revision are not yet verified.**
 
 **Design decision:** even if procedure preparation proves faster,
 cross-query reuse would require an explicitly prepared function
@@ -1528,6 +1534,8 @@ on the fixed replay traces.
 | 2026-11-08 | Added P6 benchmark-only reuse of precompiled vector hull procedures in P1: production rebuild-per-round vs compile once per query vs prepare once per function across all five d4/f3 paving traces. Exact final-box and exported separation equivalence required against both production and frozen full scan for every query. Numeric-style logging CLI report with per-shape medians, separate compilation median, five-shape geometric mean and workload-weighted totals. | Full C++ build and operator five-shape replay/timings pending; production and API unchanged, per-workload reuse requires explicitly prepared-function ownership. |
 
 | 2026-11-08 | Corrected the P6 benchmark compile failure from unsupported `Vector<ValidatedProcedure>(function)` construction (AppleClang errors at former lines 3090, 3106, 3152). Use the public indexed vector generator with explicit `ValidatedProcedure(function[i])` for each output, retaining vector hull scheduling. | Rebuild and five-shape exact-equality replay pending; no production changes. |
+
+| 2026-11-08 | Fixed a second P6 AppleClang failure: generic `Vector(n,generator)` instantiates `UniformArray<ValidatedProcedure>` which lacks characteristics. The actual vector procedure is a specialized `Vector<Procedure<Y>>` declared in `function/procedure.hpp`; reordered benchmark includes to match production and restored its direct constructor from the vector-valued function. | New build and five-shape equivalence replay still pending; no solver changes. |
 
 ### Update protocol
 
