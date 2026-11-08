@@ -582,6 +582,62 @@ cmake --build build-release --target benchmark_constraint_reduce
   --compare-adaptive-shaving --samples 7 --concurrency 0
 ```
 
+#### P5 correctness-only replay, 2026-11-08
+
+The operator compiled the corrected benchmark and provided
+ADAPTIVE_SHAVING_VERIFIED for both methods on all five adaptive
+d4/f3 traces. Production P1 and the frozen legacy full scan
+were checked for identical final boxes and paving separation bits
+on all **9,167 queries**. The diagnostic prototype was checked
+for domain reductivity and for preservation of the **certified
+centre-point witnesses** in the recorded trace boxes. This is
+a useful regression check, **not** a proof that all feasible
+points are preserved or that each additional empty box is valid.
+Separate correctness tests, including adversarial witnesses and
+a careful audit of boundary-interval coverage, remain necessary.
+
+| Shape | P1 evaluations | Budget-8 evaluations | Depth-8 / cap-64 evaluations | Budget-8 same / stronger / weaker / incomparable | Resolution same / stronger / weaker / incomparable |
+| --- | ---: | ---: | ---: | --- | --- |
+| aligned-box | 0 | 0 | 0 | 2927 / 0 / 0 / 0 | 2927 / 0 / 0 / 0 |
+| rotated-box | 48000 | 141500 | 326468 | 2439 / 120 / 32 / 0 | 2223 / 304 / 64 / 0 |
+| aligned-ellipsoid | 91644 | 147855 | 191479 | 1003 / 0 / 124 / 0 | 788 / 331 / 0 / 8 |
+| rotated-ellipsoid | 107526 | 85208 | 448994 | 671 / 24 / 324 / 36 | 425 / 618 / 0 / 12 |
+| ball | 110412 | 181704 | 243708 | 1387 / 0 / 80 / 0 | 1043 / 424 / 0 / 0 |
+| **Total** | **357582** | **556267** | **1210649** | **8427 / 144 / 560 / 36** | **7406 / 1677 / 64 / 20** |
+
+The budget-8 version performs **1.556x** as many interval
+evaluations as P1, despite having the same *maximum per-call*
+evaluation count: it induces different contractions, rounds
+and calls, and frequently evaluates both halves of the
+subdivision tree. It also produces weaker boxes in 560
+queries versus stronger boxes in only 144. The resolution
+variant performs **3.386x** as many evaluations, mostly for
+stronger domain reductions (1677 queries), but 64 weaker
+and 20 incomparable cases remain. The depth limit is
+relative to the initial coordinate width, not an absolute
+or scale-invariant stopping tolerance.
+
+The resolution variant reports **28 additional empty boxes**
+for rotated-ellipsoid, while P1 certifies none of those 28
+empty. These are **candidate-only rejection claims**, not
+independently established infeasible queries: the benchmark
+checks a single feasible centre candidate per input only
+when its image is independently certified inside the
+codomain. The two methods agree on all recorded P1 empty
+queries. Do not use these 28 new emptiness decisions in
+production paving without stronger validation.
+
+**Decision:** neither prototype is ready for production.
+The next diagnostic is to distinguish repeated interval
+evaluations of the same dyadic cell, redundant testing from
+opposite ends, and the cost of stopping at uncertain leaves.
+A reuse-aware/shallow-first variant should be compared
+against P1 only after checking its exclusion proofs and
+separation claims on independent cases. Timed
+ADAPTIVE_SHAVING_COMPARE output was **not provided** in
+this run, so no measured speedup or slowdown can yet be
+claimed; evaluation counts alone are not wall times.
+
 Do **not** promote an adaptive variant merely because its
 loop is cheaper. Its contraction strength, certified
 separation count, and feasible-witness preservation are
@@ -774,6 +830,8 @@ can be added for correctness-only replay.
 | 2026-11-08 | Add benchmark-only adaptive dyadic boundary shaving prototypes: 8-evaluation budget versus depth-limited resolution with a higher cap, validated disjointness proofs, and measurement of contraction-strength changes relative to current P1. | Experiment implemented; compile, independent correctness checks, and timings pending |
 
 | 2026-11-08 | Fixed adaptive benchmark build failure: the solver's file-local `affine()` was not visible in the benchmark. Added a benchmark-local `adaptive_affine()` with identical interpolation arithmetic and removed an unused evaluation variable. | Source corrected; local rebuild/verification pending |
+
+| 2026-11-08 | P5 adaptive correctness-only replay passed baseline equivalence on 9,167 queries; budget-8 used 556,267 versus 357,582 production evaluations, resolution-cap-64 used 1,210,649. The resolution candidate returned 28 additional empty results on rotated-ellipsoid, not independently proved. | Keep both prototypes diagnostic; inspect duplicated dyadic evaluations and strengthen correctness validation before any promotion |
 
 ### Update protocol
 
