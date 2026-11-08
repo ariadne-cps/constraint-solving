@@ -3433,7 +3433,7 @@ void print_precompiled_hull_report(
     if(selection.prepared_batch_size!=0u) {
         double current_sum_ms=0.0;
         double batch_sum_ms=0.0;
-        SizeType total_queries=0u,total_preparations=0u;
+        SizeType batch_queries=0u,total_preparations=0u;
         double log_speedup=0.0;
         LOGGING_PRINTLN(" ")
         LOGGING_PRINTLN("Bounded prepared-procedure reuse: batch size "
@@ -3448,7 +3448,7 @@ void print_precompiled_hull_report(
         for(auto const& item:rows) {
             current_sum_ms+=item.per_query_ms;
             batch_sum_ms+=item.batch_ms;
-            total_queries+=item.queries;
+            batch_queries+=item.queries;
             total_preparations+=item.batch_preparations;
             double const speedup=item.per_query_ms/item.batch_ms;
             log_speedup+=std::log(speedup);
@@ -3461,7 +3461,7 @@ void print_precompiled_hull_report(
         }
         LOGGING_PRINTLN(std::string(83u,'-'))
         LOGGING_PRINTLN("PREPARED_BATCH_AGGREGATE shapes="<<rows.size()
-            <<" queries="<<total_queries
+            <<" queries="<<batch_queries
             <<" batch_size="<<selection.prepared_batch_size
             <<" preparations="<<total_preparations
             <<" current_p1_sum_ms="<<std::fixed<<std::setprecision(5)
