@@ -1290,6 +1290,80 @@ can be added for correctness-only replay.
 
 | 2026-11-08 | Operator macOS Release C++ full rational audit completed on 1,055 rotated-ellipsoid d4/f3 trace queries at `$HOME/Downloads/traces/outer`: 360 empty, 695 feasible. P1/budget-8/resolution evaluated respectively 1,500/1,444/1,682 exact cut half-slabs (4,626 total); all three show 0 lost faces and 0 lost cases. Sound empty-result counts 296/296/324, with 28/28 resolution extras exactly proved. Corrected semantic set comparisons: budget 729 equal, 24 stronger, 302 weaker, 0 incomparable; resolution 483 equal, 572 stronger, 0 weaker, 0 incomparable (supersedes earlier incorrect 437/618 interpretation). | Close trace-specific feasible-point preservation validation, no production promotion; investigate cheaper strength-preserving methods and generalized proof/invariants. |
 
+
+### P5 hybrid experiment — P1 first, adaptive resolution only after P1
+
+**Status (2026-11-08):** benchmark-only implementation. Compilation, full
+trace verification and timing measurements are pending; no measured
+performance improvement is yet claimed.
+
+The `--compare-hybrid-shaving` mode in the existing C++ executable
+compares three whole-query workloads on **all five geometries**
+(`aligned-box,rotated-box,aligned-ellipsoid,rotated-ellipsoid,ball`):
+
+1. **P1**: production `ConstraintSolver::reduce()` alone.
+2. **Always**: P1 followed by depth-limited adaptive resolution whenever
+   P1 has not already separated the query.
+3. **Gated**: P1 followed by the same resolution contractor only when
+   P1 leaves a sum of coordinate widths at least
+   `--hybrid-width-threshold` (default 3.0). The initial unit
+   cube has width sum 4.0. The threshold is **identical across all
+   shapes**, chosen independently of oracle results, and depends
+   only on the already-computed P1 domain. Both adaptive variants
+   use the verified per-box dyadic-cell memoization. Threshold 0.0
+   should give exactly the Always behavior on all nonempty P1 boxes.
+
+Outside the timed loops, each query is checked against the frozen
+full-scan reference and the original paving separation bit.
+Each hybrid output must refine P1 set-semantically and preserve
+independently validated feasible centre witnesses, when available.
+The gated output must agree with Always whenever the gate activates,
+and with P1 whenever it does not. For `rotated-ellipsoid` only,
+the complete exact Ariadne `Rational` half-slab audit also runs on
+every feasible query for both hybrid variants, with no oracle
+information entering the gate or timed workloads. The other four
+shapes do **not** have a complete exact feasible-set audit.
+
+Timing measures three separately calibrated **end-to-end query
+sweeps**, including P1, subsequent adaptive work, memoization and
+the gating test. The logger prints per-shape verification counters
+and aligned timing tables with baseline, Always and Gated medians.
+Both an equally weighted **geometric mean** of per-shape speedup
+ratios and a **workload-weighted ratio of sums of medians** are
+reported. Do not conflate either with paired-run timings.
+
+The command line now uses the public `LoggingCommandLineInterface`
+and Ariadne's `make_valued_argument_parser` /
+`make_unvalued_argument_parser` APIs. New reports use
+`LOGGING_PRINTLN` with the formatted, aggregated style of the
+Numeric benchmark suite. Historical `ADAPTIVE_*` and `AUDIT_*`
+machine-readable diagnostics are kept unchanged. The private
+Numeric benchmark helper header is not imported. Logging is
+an existing Ariadne dependency and is linked explicitly by
+the standalone benchmark, without changing the solver or its API.
+
+```sh
+git pull --ff-only
+cmake --build build-release --target benchmark_constraint_reduce
+./build-release/benchmarks/benchmark_constraint_reduce \
+  --trace-prefix "$HOME/Downloads/traces/outer" \
+  --shapes aligned-box,rotated-box,aligned-ellipsoid,rotated-ellipsoid,ball \
+  --compare-hybrid-shaving \
+  --hybrid-width-threshold 3.0 \
+  --adaptive-depth 8 --adaptive-resolution-budget 64 \
+  --verify-only --concurrency 0
+# For timing, remove --verify-only and add --samples 7 --min-sample-ms 12.
+```
+
+**Decision gate:** a win restricted to `rotated-ellipsoid` is
+insufficient for production promotion. The five-shape aggregate,
+additional sound separations, retained feasible points and full
+end-to-end cost all matter. Any candidate must ultimately pass
+general correctness and cross-platform tests, not just the
+rotated-ellipsoid-specific exact oracle.
+
+| 2026-11-08 | Added benchmark-only P1+adaptive-resolution hybrid (Always and width-gated variants, default threshold 3.0) on all five d4/f3 paving shape traces. Frozen baseline and paving-bit verification, subset/witness checks on all shapes, full exact rotated-ellipsoid preservation check. Whole-query independent median times, per-shape table, geometric-mean and weighted aggregate. Migrated executable argument parsing to LoggingCommandLineInterface and added LOGGING_PRINTLN structured reporting for the hybrid, following Numeric. | Build, five-shape correctness replay and timed run pending; no production algorithm changes. |
+
 ### Update protocol
 
 For every follow-up investigation: add a dated row to the

@@ -12,6 +12,7 @@
 #include "geometry/box.hpp"
 #include "foundation/logical.hpp"
 #include "logging/logging.hpp"
+#include "logging/logging_command_line_interface.hpp"
 
 #include <algorithm>
 #include <array>
@@ -51,12 +52,14 @@ struct Selection {
     Bool profile_residual_shaving=false;
     Bool compare_adaptive_shaving=false;
     Bool compare_adaptive_cache=false;
+    Bool compare_hybrid_shaving=false;
     Bool audit_ellipsoid_self_test=false;
     Bool audit_resolution_incomparables=false;
     Bool audit_all_ellipsoid_contractions=false;
     unsigned adaptive_depth=8u;
     unsigned adaptive_budget=8u;
     unsigned adaptive_resolution_budget=64u;
+    double hybrid_width_threshold=3.0;
     std::string trace_prefix;
 };
 
@@ -90,125 +93,108 @@ std::vector<std::string> shapes_argument(std::string const& input) {
     return result;
 }
 
-// This component has no threading dependency. Keep its tiny CLI local,
-// while accepting --concurrency 0 for parity with the paving benchmarks.
-void print_usage(char const* program) {
-    std::cout<<"Usage: "<<program<<" [options]\n"
-             <<"  -g, --shapes NAMES         Comma-separated shape list\n"
-             <<"  -n, --samples N            Odd number of samples (>=3)\n"
-             <<"  --min-sample-ms N          Calibration threshold in ms\n"
-             <<"  --max-iterations N         Maximum calibrated repetitions\n"
-             <<"  --concurrency 0            Sequential mode (only supported value)\n"
-             <<"  --trace-prefix PREFIX      Replay exported paving d4/f3 boxes\n"
-             <<"  --compare-contained-skip   Compare legacy full scan vs production\n"
-             <<"  --compare-dependency-skip  Try static procedure-dependency shaving\n"
-             <<"  --profile-residual-shaving Profile P1 surviving box calls (0..8 evals)\n"
-             <<"  --compare-adaptive-shaving Compare 8-slice vs adaptive shaving\n"
-             <<"  --compare-adaptive-cache   Benchmark reuse of tested dyadic cells\n"
-             <<"  --audit-ellipsoid-self-test Test exact rational geometry oracle\n"
-             <<"  --audit-resolution-incomparables Exact audit of rotated-ellipsoid resolution tradeoffs\n"
-             <<"  --audit-all-ellipsoid-contractions Exact feasible-set audit of all three contractors\n"
-             <<"  --adaptive-depth N         Maximum dyadic depth (1..12; default 8)\n"
-             <<"  --adaptive-budget N        Tight evaluation budget (>=2; default 8)\n"
-             <<"  --adaptive-resolution-budget N Evaluation cap for depth-limited mode (default 64)\n"
-             <<"  --verify-only              Validate without timing\n"
-             <<"  -h, --help                 Print this help\n";
+// Use the same public logging CLI and report conventions as numeric
+// benchmarks, without including numeric's private benchmark helper.
+class BenchmarkThreadRegistry : public ThreadRegistryInterface {
+  public:
+    Bool has_threads_registered() const override { return false; }
+};
+
+void initialize_benchmark_logging() {
+    static BenchmarkThreadRegistry registry;
+    auto& logger=Logger::instance();
+    if(not logger.has_thread_registry_attached())
+        logger.attach_thread_registry(&registry);
+    logger.configuration().set_verbosity(1u);
 }
 
-Bool parse_arguments(int argc,char const* argv[],Selection& selection) {
-    for(int i=1;i<argc;++i) {
-        std::string argument(argv[i]);
-        if(argument=="-h" or argument=="--help") {
-            print_usage(argv[0]);
-            return false;
-        }
-        if(argument=="--verify-only") {
-            selection.verify_only=true;
-            continue;
-        }
-        if(argument=="--compare-contained-skip") {
-            selection.compare_contained_skip=true;
-            continue;
-        }
-        if(argument=="--compare-dependency-skip") {
-            selection.compare_dependency_skip=true;
-            continue;
-        }
-        if(argument=="--profile-residual-shaving") {
-            selection.profile_residual_shaving=true;
-            continue;
-        }
-        if(argument=="--compare-adaptive-shaving") {
-            selection.compare_adaptive_shaving=true;
-            continue;
-        }
-        if(argument=="--compare-adaptive-cache") {
-            selection.compare_adaptive_cache=true;
-            continue;
-        }
-        if(argument=="--audit-ellipsoid-self-test") {
-            selection.audit_ellipsoid_self_test=true;
-            continue;
-        }
-        if(argument=="--audit-resolution-incomparables") {
-            selection.audit_resolution_incomparables=true;
-            continue;
-        }
-        if(argument=="--audit-all-ellipsoid-contractions") {
-            selection.audit_all_ellipsoid_contractions=true;
-            continue;
-        }
-        if(i+1>=argc) {
-            throw std::invalid_argument("missing value for "+argument);
-        }
-        std::string value(argv[++i]);
-        if(argument=="-g" or argument=="--shapes") {
-            selection.shapes=shapes_argument(value);
-        } else if(argument=="-n" or argument=="--samples") {
-            unsigned number=unsigned_argument(value);
-            if(number<3u or number%2u==0u)
-                throw std::invalid_argument("samples must be odd and >=3");
-            selection.samples=number;
-        } else if(argument=="--min-sample-ms") {
-            unsigned number=unsigned_argument(value);
-            if(number==0u or number>10000u)
-                throw std::invalid_argument("min-sample-ms out of range");
-            selection.min_sample_ms=number;
-        } else if(argument=="--max-iterations") {
-            unsigned number=unsigned_argument(value);
-            if(number==0u)
-                throw std::invalid_argument("max-iterations must be positive");
-            selection.max_iterations=number;
-        } else if(argument=="--adaptive-depth") {
-            unsigned depth=unsigned_argument(value);
-            if(depth<1u or depth>12u)
-                throw std::invalid_argument("adaptive-depth must be in 1..12");
-            selection.adaptive_depth=depth;
-        } else if(argument=="--adaptive-budget") {
-            unsigned budget=unsigned_argument(value);
-            if(budget<2u or budget>4096u)
-                throw std::invalid_argument("adaptive-budget must be in 2..4096");
-            selection.adaptive_budget=budget;
-        } else if(argument=="--adaptive-resolution-budget") {
-            unsigned budget=unsigned_argument(value);
-            if(budget<2u or budget>4096u)
-                throw std::invalid_argument(
-                    "adaptive-resolution-budget must be in 2..4096");
-            selection.adaptive_resolution_budget=budget;
-        } else if(argument=="--trace-prefix") {
+List<ArgumentParser> benchmark_argument_parsers(Selection& s) {
+    List<ArgumentParser> parsers;
+    auto number=[&](String const& short_id,String const& long_id,
+                    String const& help,unsigned& field,unsigned low,
+                    unsigned high) {
+        parsers.append(make_valued_argument_parser(
+            short_id,long_id,help,
+            [&field,low,high](String const& value)->VoidFunction {
+                unsigned const parsed=unsigned_argument(std::string(value));
+                if(parsed<low or parsed>high)
+                    throw std::invalid_argument("integer argument out of range");
+                return [&field,parsed] {field=parsed;};
+            }));
+    };
+    auto flag=[&](String const& id,String const& help,Bool& field) {
+        parsers.append(make_unvalued_argument_parser(
+            "",id,help,[&field] {field=true;}));
+    };
+    parsers.append(make_valued_argument_parser(
+        "g","shapes","Comma-separated shapes (default: all five)",
+        [&s](String const& value)->VoidFunction {
+            auto parsed=shapes_argument(std::string(value));
+            return [&s,parsed] {s.shapes=parsed;};
+        }));
+    number("n","samples","Odd sample count (at least 3)",
+           s.samples,3u,100000u);
+    number("","min-sample-ms","Minimum sample duration in milliseconds",
+           s.min_sample_ms,1u,10000u);
+    number("","max-iterations","Maximum calibrated iterations",
+           s.max_iterations,1u,std::numeric_limits<unsigned>::max());
+    number("","adaptive-depth","Maximum dyadic depth (1..12)",
+           s.adaptive_depth,1u,12u);
+    number("","adaptive-budget","Adaptive evaluation budget (2..4096)",
+           s.adaptive_budget,2u,4096u);
+    number("","adaptive-resolution-budget",
+           "Resolution evaluation budget (2..4096)",
+           s.adaptive_resolution_budget,2u,4096u);
+    parsers.append(make_valued_argument_parser(
+        "","trace-prefix","Prefix of exported d4/f3 paving trace files",
+        [&s](String const& value)->VoidFunction {
             if(value.empty())
                 throw std::invalid_argument("trace prefix must not be empty");
-            selection.trace_prefix=value;
-        } else if(argument=="--concurrency") {
-            if(value!="0") {
-                throw std::invalid_argument(
-                    "only --concurrency 0 is supported by this sequential benchmark");
-            }
-        } else {
-            throw std::invalid_argument("unknown argument: "+argument);
-        }
-    }
-    return true;
+            std::string const prefix(value);
+            return [&s,prefix] {s.trace_prefix=prefix;};
+        }));
+    parsers.append(make_valued_argument_parser(
+        "","hybrid-width-threshold",
+        "Threshold for sum of four retained widths, in [0,4] (default 3)",
+        [&s](String const& value)->VoidFunction {
+            std::string const token(value);
+            std::size_t used=0u;
+            double const parsed=std::stod(token,&used);
+            if(used!=token.size() or not std::isfinite(parsed)
+               or parsed<0.0 or parsed>4.0)
+                throw std::invalid_argument("width threshold must be in [0,4]");
+            return [&s,parsed] {s.hybrid_width_threshold=parsed;};
+        }));
+    parsers.append(make_valued_argument_parser(
+        "","concurrency","Sequential benchmark; only 0 is supported",
+        [](String const& value)->VoidFunction {
+            if(value!="0")
+                throw std::invalid_argument("only --concurrency 0 is supported");
+            return [] {};
+        }));
+    flag("verify-only","Validate without collecting timings",s.verify_only);
+    flag("compare-contained-skip","Compare P1 against legacy full scan",
+         s.compare_contained_skip);
+    flag("compare-dependency-skip","Compare static dependency pruning",
+         s.compare_dependency_skip);
+    flag("profile-residual-shaving","Profile P1 residual box calls",
+         s.profile_residual_shaving);
+    flag("compare-adaptive-shaving","Compare adaptive boundary shaving",
+         s.compare_adaptive_shaving);
+    flag("compare-adaptive-cache","Compare cached adaptive shaving",
+         s.compare_adaptive_cache);
+    flag("compare-hybrid-shaving",
+         "Compare P1, P1+resolution and width-gated P1+resolution",
+         s.compare_hybrid_shaving);
+    flag("audit-ellipsoid-self-test","Self-test exact rational oracle",
+         s.audit_ellipsoid_self_test);
+    flag("audit-resolution-incomparables",
+         "Audit incomparable rotated-ellipsoid cases exactly",
+         s.audit_resolution_incomparables);
+    flag("audit-all-ellipsoid-contractions",
+         "Audit all rotated-ellipsoid contractions exactly",
+         s.audit_all_ellipsoid_contractions);
+    return parsers;
 }
 
 List<EffectiveConstraint> shape_constraints(std::string const& shape) {
@@ -2653,6 +2639,359 @@ void compare_adaptive_cache(Selection const& selection,
                 " Independent medians are fixed-order measurements.\n";
 }
 
+// Production-first adaptive candidate, benchmark-only. All variants use the
+// existing validated contractor and its verified per-call cell memoization.
+// The gate uses only the P1 output width sum and contains no shape/oracle logic.
+struct HybridCounters {
+    SizeType queries=0u;
+    SizeType activated=0u;
+    SizeType skipped_empty=0u;
+    SizeType skipped_gate=0u;
+    SizeType unchanged=0u;
+    SizeType strictly_stronger=0u;
+    SizeType extra_separated=0u;
+    SizeType separated=0u;
+    SizeType witness_checks=0u;
+    SizeType cut_faces=0u;
+    SizeType soundness_failures=0u;
+    AdaptiveShavingStatistics adaptive;
+};
+
+double hybrid_width_sum(UpperBoxType const& box) {
+    double sum=0.0;
+    for(SizeType i=0u;i<box.size();++i)
+        sum+=box[i].upper_bound().get_d()-box[i].lower_bound().get_d();
+    return sum;
+}
+
+bool hybrid_gate(UpperBoxType const& production,double width_threshold) {
+    // The same, predeclared dimensionless gate applies to all five shapes.
+    // The initial 4D unit cube has width sum 4.0.
+    return hybrid_width_sum(production)>=width_threshold;
+}
+
+void hybrid_after_production(
+        ConstraintSolver const& solver,UpperBoxType& domain,
+        ValidatedVectorMultivariateFunction const& function,
+        ExactBoxType const& codomain,AdaptiveShavingSettings const& settings,
+        double threshold,bool gated,HybridCounters* counters=nullptr) {
+    if(counters) ++counters->queries;
+    if(definitely(domain.is_empty())) {
+        if(counters) ++counters->skipped_empty;
+        return;
+    }
+    if(gated and not hybrid_gate(domain,threshold)) {
+        if(counters) ++counters->skipped_gate;
+        return;
+    }
+    if(counters) ++counters->activated;
+    reduce_adaptive_shaving(
+        solver,domain,function,codomain,settings,
+        counters?&counters->adaptive:nullptr,true);
+}
+
+struct HybridRow {
+    std::string shape;
+    SizeType queries=0u;
+    SizeType baseline_separated=0u;
+    HybridCounters always;
+    HybridCounters gated;
+    double production_ms=0.0;
+    double always_ms=0.0;
+    double gated_ms=0.0;
+    unsigned production_iterations=0u;
+    unsigned always_iterations=0u;
+    unsigned gated_iterations=0u;
+};
+
+HybridRow compare_hybrid_shaving(
+        Selection const& selection,std::string const& shape) {
+    SolverProblem problem=make_problem(shape);
+    std::vector<TraceRecord> const traces=
+        read_adaptive_trace(selection.trace_prefix,shape);
+    std::vector<ExactBoxType> codomains;
+    codomains.reserve(traces.size());
+    for(auto const& trace:traces) {
+        ExactBoxType codomain=problem.codomains.front();
+        for(SizeType j=0u;j<4u;++j) codomain[j]=trace.box[j];
+        codomains.push_back(std::move(codomain));
+    }
+    HybridRow row;
+    row.shape=shape;
+    row.queries=traces.size();
+    ConstraintSolver solver;
+    AdaptiveShavingSettings const resolution{
+        selection.adaptive_depth,selection.adaptive_resolution_budget
+    };
+    // Verification remains outside measured sweeps, including the exact
+    // geometry oracle (rotated-ellipsoid only).
+    for(SizeType q=0u;q<traces.size();++q) {
+        UpperBoxType baseline=problem.initial_domain;
+        solver.reduce(baseline,problem.function,codomains[q]);
+        UpperBoxType frozen=problem.initial_domain;
+        reduce_full_scan_reference(
+            solver,frozen,problem.function,codomains[q]);
+        if(not same(baseline,frozen))
+            throw std::runtime_error(
+                "hybrid baseline differs from frozen scan shape="
+                +shape+" query="+std::to_string(q));
+        bool const empty=definitely(baseline.is_empty());
+        if(empty!=traces[q].separated)
+            throw std::runtime_error(
+                "hybrid baseline differs from exported trace shape="
+                +shape+" query="+std::to_string(q));
+        row.baseline_separated+=static_cast<SizeType>(empty);
+
+        UpperBoxType always=baseline;
+        hybrid_after_production(
+            solver,always,problem.function,codomains[q],resolution,
+            selection.hybrid_width_threshold,false,&row.always);
+        UpperBoxType gated=baseline;
+        hybrid_after_production(
+            solver,gated,problem.function,codomains[q],resolution,
+            selection.hybrid_width_threshold,true,&row.gated);
+        const bool gate_activated=
+            not empty and hybrid_gate(baseline,selection.hybrid_width_threshold);
+        if(gate_activated and not same(always,gated))
+            throw std::runtime_error(
+                "hybrid gate activated but changed adaptive result shape="
+                +shape+" query="+std::to_string(q));
+        if(not gate_activated and not same(baseline,gated))
+            throw std::runtime_error(
+                "hybrid gate skipped but changed production box shape="
+                +shape+" query="+std::to_string(q));
+
+        // Independently certified centre witness for arbitrary shapes.
+        UpperBoxType const witness=ExactBoxType({
+            {0.5_x,0.5_x},{0.5_x,0.5_x},
+            {0.5_x,0.5_x},{0.5_x,0.5_x}});
+        bool feasible_centre=true;
+        for(SizeType i=0u;i<codomains[q].size();++i) {
+            if(not definitely(subset(
+                    Ariadne::apply(problem.function[i],witness),
+                    codomains[q][i]))) {
+                feasible_centre=false;
+                break;
+            }
+        }
+
+        // Complete exact convex feasibility for rotated-ellipsoid, not
+        // consulted when choosing the gate or during timed sweeps.
+        ExactEllipsoidMinimum exact;
+        if(shape=="rotated-ellipsoid")
+            exact=exact_rotated_ellipsoid_minimum(traces[q].endpoints);
+
+        for(unsigned variant=0u;variant!=2u;++variant) {
+            HybridCounters& counts=variant==0u?row.always:row.gated;
+            UpperBoxType const& candidate=variant==0u?always:gated;
+            bool const candidate_empty=definitely(candidate.is_empty());
+            counts.separated+=static_cast<SizeType>(candidate_empty);
+            counts.extra_separated+=static_cast<SizeType>(
+                candidate_empty and not empty);
+            if(empty and not candidate_empty)
+                throw std::runtime_error(
+                    "hybrid lost production separation shape="
+                    +shape+" query="+std::to_string(q));
+            if((empty and candidate_empty)
+               or (not empty and not candidate_empty
+                   and same(candidate,baseline))) {
+                ++counts.unchanged;
+            } else if(candidate_empty
+                      or definitely(refines(candidate,baseline))) {
+                ++counts.strictly_stronger;
+            } else {
+                throw std::runtime_error(
+                    "hybrid result does not refine P1 shape="+shape
+                    +" query="+std::to_string(q));
+            }
+
+            if(feasible_centre) {
+                ++counts.witness_checks;
+                if(candidate_empty
+                   or definitely(disjoint(candidate,witness)))
+                    throw std::runtime_error(
+                        "hybrid lost certified feasible witness shape="
+                        +shape+" query="+std::to_string(q));
+            }
+            if(shape=="rotated-ellipsoid") {
+                // The complete 4D geometry-specific rational audit.
+                if(exact.empty()) continue;
+                if(candidate_empty) {
+                    ++counts.soundness_failures;
+                    LOGGING_PRINTLN("HYBRID_EXACT_COUNTEREXAMPLE shape="<<shape
+                             <<" variant="<<(variant==0u?"always":"gated")
+                             <<" query="<<q
+                             <<" feasible_point="
+                             <<exact_witness_string(exact.witness))
+                } else {
+                    ExactContractionAudit const cut=
+                        audit_exact_ellipsoid_contraction(
+                            traces[q].endpoints,
+                            exact_audit_box_endpoints(candidate));
+                    counts.cut_faces+=cut.cut_faces;
+                    if(cut.lost_faces!=0u) {
+                        ++counts.soundness_failures;
+                        LOGGING_PRINTLN("HYBRID_EXACT_COUNTEREXAMPLE shape="<<shape
+                                 <<" variant="<<(variant==0u?"always":"gated")
+                                 <<" query="<<q
+                                 <<" feasible_point="
+                                 <<exact_witness_string(cut.witness)
+                                 <<" feasible_Q="<<cut.witness_q)
+                    }
+                }
+            }
+        }
+    }
+
+    for(auto const& counters:{row.always,row.gated}) {
+        if(counters.queries!=traces.size()
+           or counters.activated+counters.skipped_gate
+                           +counters.skipped_empty!=traces.size()
+           or counters.unchanged+counters.strictly_stronger!=traces.size()
+           or counters.soundness_failures!=0u)
+            throw std::runtime_error(
+                "hybrid verification or exact soundness failure shape="+shape);
+    }
+    if(row.gated.activated>row.always.activated
+       or row.gated.extra_separated>row.always.extra_separated)
+        throw std::runtime_error("hybrid gate inconsistent with always-on");
+    LOGGING_PRINTLN("HYBRID_VERIFIED shape="<<shape
+        <<" queries="<<row.queries
+        <<" baseline_empty="<<row.baseline_separated
+        <<" always_activated="<<row.always.activated
+        <<" always_extra_empty="<<row.always.extra_separated
+        <<" always_stronger="<<row.always.strictly_stronger
+        <<" gated_activated="<<row.gated.activated
+        <<" gated_skipped_width="<<row.gated.skipped_gate
+        <<" gated_extra_empty="<<row.gated.extra_separated
+        <<" gated_stronger="<<row.gated.strictly_stronger
+        <<" always_evaluations="<<row.always.adaptive.evaluations
+        <<" gated_evaluations="<<row.gated.adaptive.evaluations
+        <<" exact_soundness_failures="
+            <<(row.always.soundness_failures+row.gated.soundness_failures))
+
+    if(selection.verify_only) return row;
+
+    auto timed=[&](int variant) {
+        SizeType checksum=0u;
+        for(auto const& codomain:codomains) {
+            UpperBoxType domain=problem.initial_domain;
+            solver.reduce(domain,problem.function,codomain);
+            if(variant!=0)
+                hybrid_after_production(
+                    solver,domain,problem.function,codomain,resolution,
+                    selection.hybrid_width_threshold,variant==2);
+            checksum+=static_cast<SizeType>(definitely(domain.is_empty()));
+            keep_alive(domain);
+        }
+        return checksum;
+    };
+    if(timed(0)!=row.baseline_separated
+       or timed(1)!=row.always.separated
+       or timed(2)!=row.gated.separated)
+        throw std::runtime_error("hybrid timed-checksum mismatch shape="+shape);
+    Timing const t0=median_ms([&]{return timed(0);},selection);
+    Timing const t1=median_ms([&]{return timed(1);},selection);
+    Timing const t2=median_ms([&]{return timed(2);},selection);
+    row.production_ms=t0.milliseconds;
+    row.always_ms=t1.milliseconds;
+    row.gated_ms=t2.milliseconds;
+    row.production_iterations=t0.iterations;
+    row.always_iterations=t1.iterations;
+    row.gated_iterations=t2.iterations;
+    for(double x:{row.production_ms,row.always_ms,row.gated_ms})
+        if(not std::isfinite(x) or x<=0.0)
+            throw std::runtime_error("hybrid nonpositive/nonfinite timing");
+    return row;
+}
+
+void print_hybrid_report(
+        std::vector<HybridRow> const& rows,Selection const& selection) {
+    if(rows.empty()) throw std::runtime_error("no hybrid benchmark shapes");
+    LOGGING_PRINTLN(" ")
+    LOGGING_PRINTLN("P1 / hybrid adaptive resolution benchmark | d=4 f=3"
+                   <<" | samples="<<selection.samples
+                   <<" | gate: remaining width sum >= "
+                   <<std::fixed<<std::setprecision(2)
+                   <<selection.hybrid_width_threshold)
+    LOGGING_PRINTLN("Timing includes the entire P1 and adaptive sweep,"
+                   " with all adaptive memoization and gate overhead.")
+    LOGGING_PRINTLN("Verified contractions and gating by shape")
+    LOGGING_PRINTLN(std::string(99u,'-'))
+    LOGGING_PRINTLN(std::left<<std::setw(20)<<"Shape"
+        <<std::right<<std::setw(10)<<"Queries"
+        <<std::setw(12)<<"P1 empty"
+        <<std::setw(15)<<"Always extra"
+        <<std::setw(15)<<"Gated extra"
+        <<std::setw(13)<<"Gated calls"
+        <<std::setw(14)<<"Gated evals")
+    for(auto const& row:rows) {
+        LOGGING_PRINTLN(std::left<<std::setw(20)<<row.shape
+            <<std::right<<std::setw(10)<<row.queries
+            <<std::setw(12)<<row.baseline_separated
+            <<std::setw(15)<<row.always.extra_separated
+            <<std::setw(15)<<row.gated.extra_separated
+            <<std::setw(13)<<row.gated.activated
+            <<std::setw(14)<<row.gated.adaptive.evaluations)
+    }
+    LOGGING_PRINTLN(std::string(99u,'-'))
+    if(selection.verify_only) {
+        LOGGING_PRINTLN("Verification only: no timing samples collected.")
+        return;
+    }
+    LOGGING_PRINTLN(std::string(113u,'='))
+    LOGGING_PRINTLN(std::left<<std::setw(20)<<"Shape"
+        <<std::right<<std::setw(14)<<"P1 (ms)"
+        <<std::setw(16)<<"Always (ms)"
+        <<std::setw(16)<<"Gated (ms)"
+        <<std::setw(15)<<"Always/P1"
+        <<std::setw(15)<<"Gated/P1"
+        <<std::setw(16)<<"Gate calls")
+    LOGGING_PRINTLN(std::string(113u,'-'))
+    double log_always=0.0,log_gated=0.0;
+    double total_p1=0.0,total_always=0.0,total_gated=0.0;
+    SizeType all_queries=0u,all_gate_activated=0u,all_extras=0u;
+    for(auto const& row:rows) {
+        double const a=row.production_ms/row.always_ms;
+        double const g=row.production_ms/row.gated_ms;
+        log_always+=std::log(a);
+        log_gated+=std::log(g);
+        total_p1+=row.production_ms;
+        total_always+=row.always_ms;
+        total_gated+=row.gated_ms;
+        all_queries+=row.queries;
+        all_gate_activated+=row.gated.activated;
+        all_extras+=row.gated.extra_separated;
+        LOGGING_PRINTLN(std::left<<std::setw(20)<<row.shape
+            <<std::right<<std::fixed<<std::setprecision(4)
+            <<std::setw(14)<<row.production_ms
+            <<std::setw(16)<<row.always_ms
+            <<std::setw(16)<<row.gated_ms
+            <<std::setprecision(3)
+            <<std::setw(14)<<a<<"x"
+            <<std::setw(14)<<g<<"x"
+            <<std::setw(16)<<row.gated.activated)
+    }
+    LOGGING_PRINTLN(std::string(113u,'='))
+    LOGGING_PRINTLN("HYBRID_AGGREGATE shapes="<<rows.size()
+        <<" queries="<<all_queries
+        <<" gate_activations="<<all_gate_activated
+        <<" gate_additional_empty="<<all_extras
+        <<" always_geomean_speedup="
+        <<std::fixed<<std::setprecision(4)
+        <<std::exp(log_always/static_cast<double>(rows.size()))
+        <<" gated_geomean_speedup="
+        <<std::exp(log_gated/static_cast<double>(rows.size()))
+        <<" production_sum_ms="<<total_p1
+        <<" always_sum_ms="<<total_always
+        <<" gated_sum_ms="<<total_gated
+        <<" always_total_speedup="<<(total_p1/total_always)
+        <<" gated_total_speedup="<<(total_p1/total_gated))
+    LOGGING_PRINTLN("Ratios >1 mean faster than P1. Geomean weights each"
+        <<" shape equally; ratio of summed medians weights by workload."
+        <<" These are separate calibrated sweeps, not paired timings.")
+}
+
 struct Datum {
     std::string shape;
     std::string operation;
@@ -2893,10 +3232,23 @@ void report(std::vector<Datum> const& data,Selection const& selection) {
 } // namespace
 
 int main(int argc,char const* argv[]) {
+    initialize_benchmark_logging();
     try {
-        Logger::instance().configuration().set_verbosity(1u);
         Selection selection;
-        if(not parse_arguments(argc,argv,selection)) return 0;
+        LoggingCommandLineInterface cli;
+        cli.add(CommandLineContribution(
+            "constraint-solving-reduce-benchmark",
+            benchmark_argument_parsers(selection)));
+        List<String> arguments;
+        for(int i=0;i<argc;++i) arguments.append(String(argv[i]));
+        if(not cli.acquire(arguments)) {
+            for(int i=1;i<argc;++i)
+                if(std::string(argv[i])=="-h"
+                   or std::string(argv[i])=="--help") return 0;
+            return 1;
+        }
+        if(selection.samples<3u or selection.samples%2u==0u)
+            throw std::invalid_argument("samples must be odd and >=3");
         if(selection.audit_ellipsoid_self_test) {
             if(not selection.trace_prefix.empty()
                or selection.compare_contained_skip
@@ -2904,6 +3256,7 @@ int main(int argc,char const* argv[]) {
                or selection.profile_residual_shaving
                or selection.compare_adaptive_shaving
                or selection.compare_adaptive_cache
+               or selection.compare_hybrid_shaving
                or selection.audit_resolution_incomparables
                or selection.audit_all_ellipsoid_contractions)
                 throw std::invalid_argument(
@@ -2936,11 +3289,23 @@ int main(int argc,char const* argv[]) {
             +static_cast<unsigned>(selection.compare_dependency_skip)
             +static_cast<unsigned>(selection.profile_residual_shaving)
             +static_cast<unsigned>(selection.compare_adaptive_shaving)
-            +static_cast<unsigned>(selection.compare_adaptive_cache);
+            +static_cast<unsigned>(selection.compare_adaptive_cache)
+            +static_cast<unsigned>(selection.compare_hybrid_shaving);
         if(modes>1u)
             throw std::invalid_argument(
                 "comparison and profiling modes are mutually exclusive");
         if(not selection.trace_prefix.empty()) {
+            if(selection.compare_hybrid_shaving) {
+                std::vector<HybridRow> rows;
+                rows.reserve(selection.shapes.size());
+                for(std::string const& shape:selection.shapes) {
+                    LOGGING_PRINTLN("Measuring hybrid: "<<shape<<" ...")
+                    rows.push_back(compare_hybrid_shaving(selection,shape));
+                    LOGGING_PRINTLN("Completed hybrid: "<<shape)
+                }
+                print_hybrid_report(rows,selection);
+                return 0;
+            }
             for(std::string const& shape:selection.shapes) {
                 if(selection.compare_contained_skip) {
                     compare_contained_skip(selection,shape);
@@ -2971,7 +3336,7 @@ int main(int argc,char const* argv[]) {
         if(not selection.verify_only) report(results,selection);
         return 0;
     } catch(std::exception const& error) {
-        std::cerr<<"benchmark_constraint_reduce: "<<error.what()<<"\n";
+        LOGGING_PRINTLN("benchmark_constraint_reduce: "<<error.what())
         return 1;
     }
 }

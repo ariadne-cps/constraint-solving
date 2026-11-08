@@ -73,7 +73,7 @@ endif()
 add_executable(benchmark_constraint_reduce
     benchmarks/benchmark_constraint_reduce.cpp)
 target_link_libraries(benchmark_constraint_reduce
-    PRIVATE ariadne-constraint-solving constraint_solving)
+    PRIVATE ariadne-constraint-solving constraint_solving logging)
 set_target_properties(benchmark_constraint_reduce PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/benchmarks")
 add_dependencies(benchmarks benchmark_constraint_reduce)
