@@ -795,54 +795,57 @@ Do not infer a statistically robust few-percent gain from
 the fixed-order unpaired medians, especially where there
 is no contractor work.
 
-#### Independent exact audit of rotated-ellipsoid extra empties
+#### Integrated exact audit of rotated-ellipsoid extra empties
 
-A standalone Python standard-library auditor is available at
-`benchmarks/audit_rotated_ellipsoid.py`. This is **not** a shared
-benchmark/test header, nor a production solver change. The
-C++ `--compare-adaptive-shaving` replay now prints
-`ADAPTIVE_SHAVING_EXTRA_EMPTY` with the method and zero-based
-query index for each additional empty result.
+The exact geometry auditor is integrated into
+`benchmarks/benchmark_constraint_reduce.cpp`, and runs automatically
+when `--compare-adaptive-shaving` replays `rotated-ellipsoid` queries.
+The separate Python script has been removed. Both the budget-8 and
+resolution (default budget-64) adaptive candidates are audited. The
+`ADAPTIVE_SHAVING_EXTRA_EMPTY` messages retain zero-based query IDs.
 
-The auditor reads the original binary-double trace endpoints,
-converts each to an exact rational `Fraction`, and minimizes
-the *actual convex quadratic defining the rotated-ellipsoid*
-under the intersection of the query box with `[0,1]^4`.
-The squared shifted rotation term expands to
-`1168u^2 - 1152uv + 832v^2`, where `u=x0-1/2`,
-`v=x1-1/2`. Its Hessian is positive definite, and its
-minimum on a rectangle occurs at an interior stationary
-point, on an edge or at a corner. For the two other
-coordinates, minimizing `400(x2-1/2)^2 + 400(x3-1/2)^2`
-amounts to clamping each coordinate to `1/2`. Exact
-comparison of the resulting global minimum with `25`
-either proves that the queried geometry is empty, or
-constructs an exact rational feasible witness.
+The auditor independently minimizes the *actual convex quadratic*
+`Q=16(3u+4v)^2+64(-4u+3v)^2+400(w^2+z^2)`, with
+`(u,v,w,z)=(x0-1/2,x1-1/2,x2-1/2,x3-1/2)` and `Q<=25`.
+It intersects each trace box with `[0,1]^4`, converts the original
+`strtod` binary-double endpoints into arbitrary-precision
+`boost::multiprecision::cpp_rational` values *without rounding*,
+and checks the stationary interior point, all four edges and their
+corners. On each fixed-u edge the minimizing v is `9u/13`;
+on each fixed-v edge the minimizing u is `36v/73`.
+The w,z minima follow by clamping to `1/2`. All
+comparisons with 25 are rational and exact. For a nonempty
+intersection whose true minimum is at most 25, the oracle returns
+a feasible rational witness.
 
-The auditor compares each new C++ exclusion with the exact
-minimum, checks that the candidate-only ID count matches
-the benchmark summary, and independently checks that the
-original paving separation bits have no false positives.
-It emits `AUDIT_ELLIPSOID_QUERY` and
-`AUDIT_ELLIPSOID_SUMMARY`. To run:
+The audit checks **every baseline paving separation bit** and **every
+candidate-only empty result** (for both methods) against this
+independent oracle, emits `AUDIT_ELLIPSOID_QUERY` and
+`AUDIT_ELLIPSOID_SUMMARY` diagnostics, and exits nonzero
+if any claim is contradicted. It takes place before timed sweeps;
+it does not modify the production solver.
 
 ```sh
-git pull --ff-only
 cmake --build build-release --target benchmark_constraint_reduce
-python3 benchmarks/audit_rotated_ellipsoid.py --self-test
-python3 benchmarks/audit_rotated_ellipsoid.py \
+./build-release/benchmarks/benchmark_constraint_reduce --audit-ellipsoid-self-test
+./build-release/benchmarks/benchmark_constraint_reduce \
   --trace-prefix "$HOME/Downloads/traces/outer" \
-  --benchmark ./build-release/benchmarks/benchmark_constraint_reduce
+  --shapes rotated-ellipsoid \
+  --compare-adaptive-shaving --verify-only --concurrency 0
 ```
 
-**Important:** this is an *independent shape-specific
-ground-truth oracle* for rotated-ellipsoid, **not** a proof
-of soundness of the adaptive dyadic contractor on arbitrary
-functions or arbitrary-sized coordinates. If an excluded
-query has a true minimum at most 25, the auditor reports
-a feasible counterexample and exits unsuccessfully.
-Do not count the 28 claims as independently verified until
-this auditor is executed on the operator's actual traces.
+To also run the benchmark timing after the exact audit, remove
+`--verify-only`. The seven built-in self-test cases cover
+the interior minimum, an exterior point, the exact threshold,
+an edge minimum, initial-domain disjointness, binary-rational
+reconstruction and a just-outside-threshold value.
+
+**Scope:** this proves or refutes separation claims only for the
+specific rotated-ellipsoid geometry and the trace boxes actually
+replayed. It does **not** prove adaptive dyadic contractor soundness
+for arbitrary functions or coordinates. Previously reported
+28 additional empties remain unverified until this C++ replay is
+run on the operator's original traces.
 
 **Decision:** retain the memoization diagnostic for reuse
 studies but do not insert it into production. Before any
@@ -1054,6 +1057,7 @@ can be added for correctness-only replay.
 | 2026-11-08 | Adaptive dyadic per-box cache validated identical domains versus uncached on all 9,167 queries. Cache saves 107,878 evaluations (19.39%) for budget-8 and 146,144 (12.07%) for resolution; cache-only geomeans 1.124x and 1.107x. Relative to production: 1.016x and 0.662x, with the only major budget win on rotated-ellipsoid still weakening 324/1055 boxes. | Retain benchmark diagnostics, no production change; prioritize independent empty-proof audit and strength-preserving shaving |
 
 | 2026-11-08 | Added a shape-specific independent exact-arithmetic verifier for the 28 candidate-only rotated-ellipsoid empty results. The benchmark now emits candidate-only zero-based query indices; the Python auditor computes the exact convex quadratic minimum on every query box and checks baseline separation bits. | Auditor self-test passed in development; operator replay on actual traces and C++ rebuild pending |
+| 2026-11-08 | Moved the independent rotated-ellipsoid oracle into `benchmark_constraint_reduce.cpp`, using arbitrary-precision rational arithmetic on original binary-double trace endpoints; both adaptive modes and all baseline separation bits are audited before timing. Removed the Python script and added a C++ seven-case self-test mode. | Standalone oracle compiled and passed seven self-test cases; complete Ariadne build and replay on operator traces remain pending |
 
 ### Update protocol
 

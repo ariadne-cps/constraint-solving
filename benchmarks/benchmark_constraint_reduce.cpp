@@ -15,8 +15,10 @@
 
 #include <algorithm>
 #include <array>
+#include <boost/multiprecision/cpp_int.hpp>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
@@ -50,6 +52,7 @@ struct Selection {
     Bool profile_residual_shaving=false;
     Bool compare_adaptive_shaving=false;
     Bool compare_adaptive_cache=false;
+    Bool audit_ellipsoid_self_test=false;
     unsigned adaptive_depth=8u;
     unsigned adaptive_budget=8u;
     unsigned adaptive_resolution_budget=64u;
@@ -101,6 +104,7 @@ void print_usage(char const* program) {
              <<"  --profile-residual-shaving Profile P1 surviving box calls (0..8 evals)\n"
              <<"  --compare-adaptive-shaving Compare 8-slice vs adaptive shaving\n"
              <<"  --compare-adaptive-cache   Benchmark reuse of tested dyadic cells\n"
+             <<"  --audit-ellipsoid-self-test Test exact rational geometry oracle\n"
              <<"  --adaptive-depth N         Maximum dyadic depth (1..12; default 8)\n"
              <<"  --adaptive-budget N        Tight evaluation budget (>=2; default 8)\n"
              <<"  --adaptive-resolution-budget N Evaluation cap for depth-limited mode (default 64)\n"
@@ -137,6 +141,10 @@ Bool parse_arguments(int argc,char const* argv[],Selection& selection) {
         }
         if(argument=="--compare-adaptive-cache") {
             selection.compare_adaptive_cache=true;
+            continue;
+        }
+        if(argument=="--audit-ellipsoid-self-test") {
+            selection.audit_ellipsoid_self_test=true;
             continue;
         }
         if(i+1>=argc) {
@@ -298,6 +306,9 @@ SolverProblem make_problem(std::string const& shape) {
 struct TraceRecord {
     ExactBoxType box;
     Bool separated;
+    // Preserve the exact binary doubles read with strtod for an independent
+    // arbitrary-precision rational geometry audit.
+    std::array<std::pair<double,double>,4u> endpoints;
 };
 
 std::vector<TraceRecord> read_adaptive_trace(
@@ -332,6 +343,7 @@ std::vector<TraceRecord> read_adaptive_trace(
             throw std::runtime_error("invalid trace separation bit at query "
                                     +std::to_string(i));
         ExactBoxType box(4u);
+        std::array<std::pair<double,double>,4u> endpoints;
         for(SizeType j=0u;j<4u;++j) {
             std::string lower,upper;
             if(not (in>>lower>>upper))
@@ -339,15 +351,151 @@ std::vector<TraceRecord> read_adaptive_trace(
             double l=parse_number(lower);
             double u=parse_number(upper);
             if(l>u) throw std::runtime_error("reversed trace interval");
+            endpoints[j]={l,u};
             box[j]=ExactIntervalType(ExactDouble(l),ExactDouble(u));
         }
-        result.push_back({std::move(box),separated!=0u});
+        result.push_back({std::move(box),separated!=0u,endpoints});
     }
     std::string trailing;
     if(in>>trailing)
         throw std::runtime_error("unexpected trailing trace payload");
     return result;
 }
+
+// A geometry-specific oracle, independent of the adaptive contractor.
+// Arbitrary-precision rationals represent the original trace binary doubles
+// exactly. This is not a general contractor-soundness proof.
+using ExactRational = boost::multiprecision::cpp_rational;
+using ExactInteger = boost::multiprecision::cpp_int;
+using BinaryBox = std::array<std::pair<double,double>,4u>;
+
+ExactRational binary_double_as_rational(double value) {
+    if(not std::isfinite(value))
+        throw std::runtime_error("nonfinite ellipsoid trace endpoint");
+    if(value==0.0) return 0;
+    int exponent=0;
+    double mantissa=std::frexp(value,&exponent);
+    auto scaled=static_cast<std::int64_t>(std::ldexp(mantissa,53));
+    ExactRational result{ExactInteger(scaled)};
+    if(exponent>=53)
+        result*=ExactInteger(1) << static_cast<unsigned>(exponent-53);
+    else
+        result/=ExactInteger(1) << static_cast<unsigned>(53-exponent);
+    return result;
+}
+
+ExactRational rational_clamp(ExactRational const& value,
+                             ExactRational const& lower,
+                             ExactRational const& upper) {
+    return std::min(upper,std::max(lower,value));
+}
+
+ExactRational rotated_ellipsoid_q(ExactRational const& u,
+                                  ExactRational const& v,
+                                  ExactRational const& w,
+                                  ExactRational const& z) {
+    ExactRational first=3*u+4*v;
+    ExactRational second=-4*u+3*v;
+    return 16*first*first+64*second*second+400*(w*w+z*z);
+}
+
+struct ExactEllipsoidMinimum {
+    bool intersects_initial_domain=false;
+    ExactRational minimum=0;
+    std::array<ExactRational,4u> witness{};
+
+    bool empty() const {
+        return not intersects_initial_domain or minimum>25;
+    }
+};
+
+ExactEllipsoidMinimum exact_rotated_ellipsoid_minimum(BinaryBox const& box) {
+    ExactRational const zero=0;
+    ExactRational const one=1;
+    ExactRational const half=ExactRational(1)/2;
+    std::array<std::pair<ExactRational,ExactRational>,4u> domain;
+    for(std::size_t i=0u;i<4u;++i) {
+        domain[i]={std::max(zero,binary_double_as_rational(box[i].first)),
+                   std::min(one,binary_double_as_rational(box[i].second))};
+        if(domain[i].first>domain[i].second) return {};
+    }
+    ExactRational const ul=domain[0].first-half;
+    ExactRational const uu=domain[0].second-half;
+    ExactRational const vl=domain[1].first-half;
+    ExactRational const vu=domain[1].second-half;
+    ExactRational const w=
+        rational_clamp(half,domain[2].first,domain[2].second)-half;
+    ExactRational const z=
+        rational_clamp(half,domain[3].first,domain[3].second)-half;
+    ExactEllipsoidMinimum result;
+    auto consider=[&](ExactRational const& u,ExactRational const& v) {
+        ExactRational q=rotated_ellipsoid_q(u,v,w,z);
+        if(not result.intersects_initial_domain or q<result.minimum) {
+            result.intersects_initial_domain=true;
+            result.minimum=std::move(q);
+            result.witness={u+half,v+half,w+half,z+half};
+        }
+    };
+    // Q's u,v Hessian [[2336,-1152],[-1152,1664]] is positive definite.
+    // The rectangle minimum occurs at (0,0), on an edge, or at a corner.
+    if(ul<=zero and zero<=uu and vl<=zero and zero<=vu)
+        consider(zero,zero);
+    for(ExactRational const& u:{ul,uu})
+        consider(u,rational_clamp(ExactRational(9)*u/13,vl,vu));
+    for(ExactRational const& v:{vl,vu})
+        consider(rational_clamp(ExactRational(36)*v/73,ul,uu),v);
+    for(ExactRational const& u:{ul,uu})
+        for(ExactRational const& v:{vl,vu}) consider(u,v);
+    return result;
+}
+
+std::string exact_witness_string(std::array<ExactRational,4u> const& point) {
+    std::ostringstream out;
+    out<<"("<<point[0]<<","<<point[1]<<","<<point[2]<<","<<point[3]<<")";
+    return out.str();
+}
+
+void audit_rotated_ellipsoid_self_test() {
+    auto point=[](double value) {return std::make_pair(value,value);};
+    BinaryBox full{{{0,1},{0,1},{0,1},{0,1}}};
+    auto minimum=exact_rotated_ellipsoid_minimum(full);
+    std::array<ExactRational,4u> const centre{{
+        ExactRational(1)/2,ExactRational(1)/2,
+        ExactRational(1)/2,ExactRational(1)/2}};
+    if(minimum.empty() or minimum.minimum!=0 or minimum.witness!=centre)
+        throw std::runtime_error("ellipsoid audit self-test: full domain");
+    BinaryBox far{{point(1),point(1),point(0.5),point(0.5)}};
+    if(exact_rotated_ellipsoid_minimum(far).minimum!=212)
+        throw std::runtime_error("ellipsoid audit self-test: outside");
+    BinaryBox boundary{{point(0.5),point(0.5),point(0.75),point(0.5)}};
+    minimum=exact_rotated_ellipsoid_minimum(boundary);
+    if(minimum.minimum!=25 or minimum.empty())
+        throw std::runtime_error("ellipsoid audit self-test: boundary");
+    BinaryBox edge{{point(1),{0,1},point(0.5),point(0.5)}};
+    minimum=exact_rotated_ellipsoid_minimum(edge);
+    if(minimum.witness[1]!=ExactRational(11)/13
+       or minimum.minimum!=rotated_ellipsoid_q(
+           ExactRational(1)/2,ExactRational(9)/26,0,0))
+        throw std::runtime_error("ellipsoid audit self-test: edge");
+    BinaryBox disjoint{{point(2),point(0.5),point(0.5),point(0.5)}};
+    if(exact_rotated_ellipsoid_minimum(disjoint).intersects_initial_domain)
+        throw std::runtime_error("ellipsoid audit self-test: disjoint");
+    if(binary_double_as_rational(0.1)!=
+       ExactRational(3602879701896397LL)/36028797018963968LL)
+        throw std::runtime_error("ellipsoid audit self-test: binary fraction");
+    boundary[2]=point(std::nextafter(0.75,1.0));
+    if(not exact_rotated_ellipsoid_minimum(boundary).empty())
+        throw std::runtime_error("ellipsoid audit self-test: strict boundary");
+    std::cout<<"AUDIT_ELLIPSOID_SELF_TEST_OK cases=7\n";
+}
+
+struct EllipsoidAuditStatistics {
+    SizeType true_empty=0u;
+    SizeType baseline_false_positive=0u;
+    std::array<SizeType,2u> reported{{0u,0u}};
+    std::array<SizeType,2u> proved_empty{{0u,0u}};
+    std::array<SizeType,2u> false_positive{{0u,0u}};
+};
 
 // A call is "changed" when its targeted interval differs from the input,
 // including certified emptiness. Unchanged calls are not necessarily
@@ -1645,6 +1793,26 @@ void compare_adaptive_shaving(Selection const& selection,
         codomains.push_back(std::move(codomain));
     }
 
+    // Audit is intentionally outside all timed sweeps. Validate every
+    // paving separation bit and retain one exact ground-truth result per box.
+    EllipsoidAuditStatistics audit;
+    std::vector<ExactEllipsoidMinimum> oracle;
+    if(shape=="rotated-ellipsoid") {
+        oracle.reserve(records.size());
+        for(SizeType q=0u;q<records.size();++q) {
+            auto minimum=exact_rotated_ellipsoid_minimum(records[q].endpoints);
+            audit.true_empty+=static_cast<SizeType>(minimum.empty());
+            if(records[q].separated and not minimum.empty()) {
+                ++audit.baseline_false_positive;
+                std::cout<<"AUDIT_ELLIPSOID_BASELINE_INVALID query="<<q
+                         <<" min_Q="<<minimum.minimum
+                         <<" feasible_point="
+                         <<exact_witness_string(minimum.witness)<<"\n";
+            }
+            oracle.push_back(std::move(minimum));
+        }
+    }
+
     ConstraintSolver solver;
     AdaptiveShavingSettings const settings[]={
         {selection.adaptive_depth,selection.adaptive_budget},
@@ -1713,6 +1881,29 @@ void compare_adaptive_shaving(Selection const& selection,
                 std::cout<<"ADAPTIVE_SHAVING_EXTRA_EMPTY shape="<<shape
                          <<" method="<<labels[method]
                          <<" query="<<q<<"\n";
+                if(shape=="rotated-ellipsoid") {
+                    ++audit.reported[method];
+                    auto const& minimum=oracle[q];
+                    if(minimum.empty()) {
+                        ++audit.proved_empty[method];
+                        std::cout<<"AUDIT_ELLIPSOID_QUERY method="<<labels[method]
+                                 <<" query="<<q<<" status=EXACTLY_EMPTY";
+                        if(not minimum.intersects_initial_domain)
+                            std::cout<<" box_disjoint_from_initial_domain=true";
+                        else
+                            std::cout<<" min_num="<<numerator(minimum.minimum)
+                                     <<" min_den="<<denominator(minimum.minimum)
+                                     <<" threshold=25";
+                        std::cout<<"\n";
+                    } else {
+                        ++audit.false_positive[method];
+                        std::cout<<"AUDIT_ELLIPSOID_QUERY method="<<labels[method]
+                                 <<" query="<<q<<" status=COUNTEREXAMPLE"
+                                 <<" min_Q="<<minimum.minimum
+                                 <<" feasible_point="
+                                 <<exact_witness_string(minimum.witness)<<"\n";
+                    }
+                }
             }
             result.candidate_only_empty+=
                 static_cast<SizeType>(candidate_empty and not empty);
@@ -1762,7 +1953,29 @@ void compare_adaptive_shaving(Selection const& selection,
                  <<" max_depth="<<settings[method].max_depth
                  <<" evaluation_budget="<<settings[method].evaluation_budget
                  <<"\n";
+        if(shape=="rotated-ellipsoid") {
+            if(audit.reported[method]!=result.candidate_only_empty
+               or audit.reported[method]!=audit.proved_empty[method]
+                   +audit.false_positive[method])
+                throw std::runtime_error("inconsistent exact audit counters");
+            std::cout<<"AUDIT_ELLIPSOID_SUMMARY method="<<labels[method]
+                     <<" queries="<<records.size()
+                     <<" true_empty="<<audit.true_empty
+                     <<" baseline_separated="<<production_separated
+                     <<" baseline_false_positive="<<audit.baseline_false_positive
+                     <<" candidate_only_reported="<<audit.reported[method]
+                     <<" candidate_only_proved_empty="<<audit.proved_empty[method]
+                     <<" candidate_only_false_positive="<<audit.false_positive[method]
+                     <<"\n";
+        }
     }
+    if(shape=="rotated-ellipsoid"
+       and (audit.baseline_false_positive!=0u
+            or audit.false_positive[0]!=0u
+            or audit.false_positive[1]!=0u))
+        throw std::runtime_error(
+            "exact rotated-ellipsoid audit found unsound separation"
+            " (see AUDIT_ELLIPSOID_* diagnostics)");
     if(selection.verify_only) return;
 
     auto production_work=[&] {
@@ -2221,6 +2434,18 @@ int main(int argc,char const* argv[]) {
         Logger::instance().configuration().set_verbosity(1u);
         Selection selection;
         if(not parse_arguments(argc,argv,selection)) return 0;
+        if(selection.audit_ellipsoid_self_test) {
+            if(not selection.trace_prefix.empty()
+               or selection.compare_contained_skip
+               or selection.compare_dependency_skip
+               or selection.profile_residual_shaving
+               or selection.compare_adaptive_shaving
+               or selection.compare_adaptive_cache)
+                throw std::invalid_argument(
+                    "ellipsoid self-test cannot be combined with replay modes");
+            audit_rotated_ellipsoid_self_test();
+            return 0;
+        }
         unsigned const modes=
             static_cast<unsigned>(selection.compare_contained_skip)
             +static_cast<unsigned>(selection.compare_dependency_skip)
