@@ -53,6 +53,7 @@ struct Selection {
     Bool compare_adaptive_cache=false;
     Bool audit_ellipsoid_self_test=false;
     Bool audit_resolution_incomparables=false;
+    Bool audit_all_ellipsoid_contractions=false;
     unsigned adaptive_depth=8u;
     unsigned adaptive_budget=8u;
     unsigned adaptive_resolution_budget=64u;
@@ -106,6 +107,7 @@ void print_usage(char const* program) {
              <<"  --compare-adaptive-cache   Benchmark reuse of tested dyadic cells\n"
              <<"  --audit-ellipsoid-self-test Test exact rational geometry oracle\n"
              <<"  --audit-resolution-incomparables Exact audit of rotated-ellipsoid resolution tradeoffs\n"
+             <<"  --audit-all-ellipsoid-contractions Exact feasible-set audit of all three contractors\n"
              <<"  --adaptive-depth N         Maximum dyadic depth (1..12; default 8)\n"
              <<"  --adaptive-budget N        Tight evaluation budget (>=2; default 8)\n"
              <<"  --adaptive-resolution-budget N Evaluation cap for depth-limited mode (default 64)\n"
@@ -150,6 +152,10 @@ Bool parse_arguments(int argc,char const* argv[],Selection& selection) {
         }
         if(argument=="--audit-resolution-incomparables") {
             selection.audit_resolution_incomparables=true;
+            continue;
+        }
+        if(argument=="--audit-all-ellipsoid-contractions") {
+            selection.audit_all_ellipsoid_contractions=true;
             continue;
         }
         if(i+1>=argc) {
@@ -566,6 +572,68 @@ BinaryBox exact_audit_box_endpoints(UpperBoxType const& domain) {
 // Coordinate-wise interval refines() need not model set inclusion when one
 // Box has a reversed interval (empty). Preserve the original comparison
 // counters, but classify empty results separately before reading endpoints.
+// A shape-specific *complete* audit of the retained result, not just
+// complete emptiness decisions or pairwise contractor differences.
+// The excluded subset of a query is the union of the eight open exterior
+// half-slabs; the exact quadratic oracle detects any feasible point there.
+struct CompleteContractionAuditStatistics {
+    SizeType queries=0u;
+    SizeType empty_geometry=0u;
+    SizeType feasible_geometry=0u;
+    SizeType empty_result_on_empty_geometry=0u;
+    SizeType nonempty_result_on_empty_geometry=0u;
+    SizeType nonempty_result_on_feasible_geometry=0u;
+    SizeType empty_result_on_feasible_geometry=0u;
+    SizeType cut_faces_checked=0u;
+    SizeType lost_faces=0u;
+    SizeType lost_cases=0u;
+};
+
+void audit_all_exact_ellipsoid_contraction(
+        SizeType query_index,char const* contractor,
+        TraceRecord const& trace,ExactEllipsoidMinimum const& geometry,
+        UpperBoxType const& result_box,
+        CompleteContractionAuditStatistics& stats) {
+    ++stats.queries;
+    bool const result_empty=definitely(result_box.is_empty());
+    if(geometry.empty()) {
+        ++stats.empty_geometry;
+        if(result_empty) ++stats.empty_result_on_empty_geometry;
+        else ++stats.nonempty_result_on_empty_geometry;
+        return; // Every contraction is sound when the query is infeasible.
+    }
+
+    ++stats.feasible_geometry;
+    if(result_empty) {
+        ++stats.empty_result_on_feasible_geometry;
+        ++stats.lost_cases;
+        std::cout<<"AUDIT_ALL_ELLIPSOID_COUNTEREXAMPLE contractor="<<contractor
+                 <<" query="<<query_index
+                 <<" reason=EMPTY_CONTRACTION_OF_FEASIBLE_QUERY"
+                 <<" feasible_Q="<<geometry.minimum
+                 <<" feasible_point="<<exact_witness_string(geometry.witness)
+                 <<"\n";
+        return;
+    }
+
+    ++stats.nonempty_result_on_feasible_geometry;
+    ExactContractionAudit const cut=audit_exact_ellipsoid_contraction(
+        trace.endpoints,exact_audit_box_endpoints(result_box));
+    stats.cut_faces_checked+=cut.cut_faces;
+    stats.lost_faces+=cut.lost_faces;
+    if(cut.lost_faces!=0u) {
+        ++stats.lost_cases;
+        std::cout<<"AUDIT_ALL_ELLIPSOID_COUNTEREXAMPLE contractor="<<contractor
+                 <<" query="<<query_index
+                 <<" reason=EXCLUDED_FEASIBLE_POINT"
+                 <<" coordinate="<<cut.witness_coordinate
+                 <<" side="<<(cut.witness_below?"below":"above")
+                 <<" feasible_Q="<<cut.witness_q
+                 <<" feasible_point="<<exact_witness_string(cut.witness)
+                 <<" lost_faces="<<cut.lost_faces<<"\n";
+    }
+}
+
 struct IncomparableAuditStatistics {
     SizeType cases=0u;
     SizeType empty_geometry=0u;
@@ -2054,6 +2122,11 @@ struct AdaptiveComparison {
     SizeType stronger=0u;
     SizeType weaker=0u;
     SizeType incomparable=0u;
+    // Actual set relations, treating all empty representations as equal.
+    SizeType set_equal=0u;
+    SizeType set_stronger=0u;
+    SizeType set_weaker=0u;
+    SizeType set_incomparable=0u;
     SizeType candidate_only_empty=0u;
     SizeType production_only_empty=0u;
     SizeType both_empty=0u;
@@ -2102,6 +2175,8 @@ void compare_adaptive_shaving(Selection const& selection,
     AdaptiveComparison comparisons[2];
     SizeType production_separated=0u;
     IncomparableAuditStatistics incomparables;
+    // production, adaptive budget, adaptive resolution.
+    std::array<CompleteContractionAuditStatistics,3u> full_audits;
     for(SizeType q=0u;q<records.size();++q) {
         UpperBoxType production=problem.initial_domain;
         solver.reduce(production,problem.function,codomains[q]);
@@ -2117,6 +2192,10 @@ void compare_adaptive_shaving(Selection const& selection,
                 "baseline differs from exported paving separation"
                 " shape="+shape+" query="+std::to_string(q));
         production_separated+=static_cast<SizeType>(empty);
+        if(selection.audit_all_ellipsoid_contractions)
+            audit_all_exact_ellipsoid_contraction(
+                q,"production",records[q],oracle[q],production,
+                full_audits[0]);
 
         // The centre is a known feasible point of all five geometries,
         // but is a witness for this *query* only if validated evaluation
@@ -2155,6 +2234,10 @@ void compare_adaptive_shaving(Selection const& selection,
                         +" query="+std::to_string(q));
             }
             Bool const candidate_empty=definitely(candidate.is_empty());
+            if(selection.audit_all_ellipsoid_contractions)
+                audit_all_exact_ellipsoid_contraction(
+                    q,labels[method],records[q],oracle[q],candidate,
+                    full_audits[method+1u]);
             // Provide query IDs for an independent exact-arithmetic
             // audit of additional empty results on the convex benchmark
             // geometry. This is diagnostic output, before timed sweeps.
@@ -2206,6 +2289,17 @@ void compare_adaptive_shaving(Selection const& selection,
                         incomparables);
                 }
             }
+            // Semantic relation, independent of the internal representation
+            // of an empty box. Keep the legacy counters above unchanged.
+            if(empty and candidate_empty) ++result.set_equal;
+            else if(candidate_empty) ++result.set_stronger;
+            else if(empty) ++result.set_weaker;
+            else if(same(candidate,production)) ++result.set_equal;
+            else if(definitely(refines(candidate,production)))
+                ++result.set_stronger;
+            else if(definitely(refines(production,candidate)))
+                ++result.set_weaker;
+            else ++result.set_incomparable;
         }
     }
 
@@ -2213,7 +2307,9 @@ void compare_adaptive_shaving(Selection const& selection,
         auto const& result=comparisons[method];
         auto const& stats=result.activity;
         if(result.exactly_same+result.stronger+result.weaker
-           +result.incomparable!=records.size())
+           +result.incomparable!=records.size()
+           or result.set_equal+result.set_stronger+result.set_weaker
+               +result.set_incomparable!=records.size())
             throw std::runtime_error("inconsistent adaptive comparison counters");
         if(stats.evaluations>stats.calls*
                 static_cast<SizeType>(settings[method].evaluation_budget))
@@ -2239,6 +2335,13 @@ void compare_adaptive_shaving(Selection const& selection,
                  <<" max_depth="<<settings[method].max_depth
                  <<" evaluation_budget="<<settings[method].evaluation_budget
                  <<"\n";
+        std::cout<<"ADAPTIVE_SHAVING_SET_RELATION shape="<<shape
+                 <<" method="<<labels[method]
+                 <<" queries="<<records.size()
+                 <<" equal="<<result.set_equal
+                 <<" stronger="<<result.set_stronger
+                 <<" weaker="<<result.set_weaker
+                 <<" incomparable="<<result.set_incomparable<<"\n";
         if(shape=="rotated-ellipsoid") {
             if(audit.reported[method]!=result.candidate_only_empty
                or audit.reported[method]!=audit.proved_empty[method]
@@ -2291,6 +2394,43 @@ void compare_adaptive_shaving(Selection const& selection,
            or incomparables.candidate_loss_cases!=0u)
             throw std::runtime_error(
                 "exact incomparable audit found a lost feasible point");
+    }
+    if(selection.audit_all_ellipsoid_contractions) {
+        char const* contractor_names[]={"production","budget","resolution"};
+        SizeType total_losses=0u;
+        for(std::size_t i=0u;i<full_audits.size();++i) {
+            auto const& s=full_audits[i];
+            if(s.queries!=records.size()
+               or s.empty_geometry!=audit.true_empty
+               or s.empty_geometry+s.feasible_geometry!=s.queries
+               or s.empty_result_on_empty_geometry
+                    +s.nonempty_result_on_empty_geometry!=s.empty_geometry
+               or s.empty_result_on_feasible_geometry
+                    +s.nonempty_result_on_feasible_geometry!=s.feasible_geometry)
+                throw std::runtime_error(
+                    "inconsistent complete ellipsoid audit counters");
+            total_losses+=s.lost_cases;
+            std::cout<<"AUDIT_ALL_ELLIPSOID_SUMMARY"
+                     <<" contractor="<<contractor_names[i]
+                     <<" queries="<<s.queries
+                     <<" empty_geometry="<<s.empty_geometry
+                     <<" feasible_geometry="<<s.feasible_geometry
+                     <<" empty_result_on_empty_geometry="
+                         <<s.empty_result_on_empty_geometry
+                     <<" nonempty_result_on_empty_geometry="
+                         <<s.nonempty_result_on_empty_geometry
+                     <<" nonempty_result_on_feasible_geometry="
+                         <<s.nonempty_result_on_feasible_geometry
+                     <<" empty_result_on_feasible_geometry="
+                         <<s.empty_result_on_feasible_geometry
+                     <<" cut_faces_checked="<<s.cut_faces_checked
+                     <<" lost_faces="<<s.lost_faces
+                     <<" lost_cases="<<s.lost_cases<<"\n";
+        }
+        if(total_losses!=0u)
+            throw std::runtime_error(
+                "complete exact ellipsoid contraction audit found"
+                " feasible-point loss (see counterexamples)");
     }
     if(shape=="rotated-ellipsoid"
        and (audit.baseline_false_positive!=0u
@@ -2764,7 +2904,8 @@ int main(int argc,char const* argv[]) {
                or selection.profile_residual_shaving
                or selection.compare_adaptive_shaving
                or selection.compare_adaptive_cache
-               or selection.audit_resolution_incomparables)
+               or selection.audit_resolution_incomparables
+               or selection.audit_all_ellipsoid_contractions)
                 throw std::invalid_argument(
                     "ellipsoid self-test cannot be combined with replay modes");
             audit_rotated_ellipsoid_self_test();
@@ -2777,6 +2918,16 @@ int main(int argc,char const* argv[]) {
                or selection.shapes.front()!="rotated-ellipsoid")
                 throw std::invalid_argument(
                     "--audit-resolution-incomparables requires"
+                    " --compare-adaptive-shaving, --trace-prefix and"
+                    " --shapes rotated-ellipsoid");
+        }
+        if(selection.audit_all_ellipsoid_contractions) {
+            if(not selection.compare_adaptive_shaving
+               or selection.trace_prefix.empty()
+               or selection.shapes.size()!=1u
+               or selection.shapes.front()!="rotated-ellipsoid")
+                throw std::invalid_argument(
+                    "--audit-all-ellipsoid-contractions requires"
                     " --compare-adaptive-shaving, --trace-prefix and"
                     " --shapes rotated-ellipsoid");
         }
