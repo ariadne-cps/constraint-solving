@@ -282,6 +282,19 @@ particularly on nonlinear constraints, and avoid claiming a
 win before observing `CONTAINED_SKIP_VERIFIED` and
 `CONTAINED_SKIP_COMPARE` on all five traces.
 
+The experimental algorithm is intentionally **duplicated locally**
+inside `tests/test_constraint_solver.cpp`; the benchmark keeps its
+own implementation. Do not introduce a shared header between the
+benchmark and the tests. This trades some maintenance duplication
+for independent build boundaries; when the experimental algorithm
+changes, synchronize the two copies deliberately and compare
+against the unmodified production oracle. The new trace-free
+test exercises both variants on independent scalar, coupled 2D,
+and mixed 3D cases, including certified containment, boundary
+contact, reuse across rounds, degenerate and empty domains,
+and nonlinear shaving-dependent infeasibility. Test outcomes
+have not yet been confirmed by CI on the new commit.
+
 The prototype retains the original hull call, loop stopping
 threshold, and iteration structure. It compares full final
 contracted boxes and separation bits against the production
@@ -513,6 +526,8 @@ can be added for correctness-only replay.
 | 2026-11-08 | Try per-query validated containment certificates before changing `reduce()`. Diagnostic-only variant at `a62046b`; no operator timing result yet. | Experiment implemented; evaluation pending |
 | 2026-11-08 | Plan dependency-filter, incremental agenda, adaptive ordering, and sound shaving search only after isolated correctness and cost studies. | Proposed; not authorized as production changes |
 | 2026-11-08 | macOS Release exact-domain replay passed 9,167 queries for certified-containment prototype; 664,928/748,469 box calls skipped, geometric-mean median speedup 2.313x (per shape 1.277-9.469x). Removed benchmark-only unused Clock alias warning. | Measured on adaptive paving traces; candidate for tested production promotion, not yet promoted |
+
+| 2026-11-08 | Added trace-independent regression cases for certified containment, with a deliberate local copy of the benchmark algorithm in the unit-test file; no shared benchmark/test header or production change. | Tests submitted; compilation and execution pending |
 
 ### Update protocol
 

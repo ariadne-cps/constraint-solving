@@ -24,6 +24,7 @@
 
 #include <iostream>
 #include <fstream>
+#include <vector>
 #include "ariadne-testing.hpp"
 
 #include "numeric/numeric.hpp"
@@ -39,6 +40,75 @@
 
 using namespace std;
 using namespace Ariadne;
+
+// Deliberate local copy of the benchmark-only containment scheduler.
+// Keep the algorithm in sync when changing the experiment. The unit tests
+// must not depend on benchmark headers or production solver changes.
+namespace {
+// Experimental contractor scheduling. A certified image enclosure
+// included in the constraint bounds proves that constraint everywhere
+// on the current domain. Since reduce only contracts its domain, the
+// certificate stays valid for the rest of this query. Neither a static
+// shape assumption nor a nonvalidated floating tolerance is used.
+struct ContainedSkipStatistics {
+    SizeType tests=0u;
+    SizeType certificates=0u;
+    SizeType reused_certificates=0u;
+    SizeType saved_box_calls=0u;
+    SizeType executed_box_calls=0u;
+};
+
+void reduce_contained_skip(ConstraintSolver const& solver,
+                           UpperBoxType& domain,
+                           ValidatedVectorMultivariateFunction const& function,
+                           ExactBoxType const& codomain,
+                           ContainedSkipStatistics* statistics=nullptr) {
+    const ExactDouble MINIMUM_REDUCTION=0.75_x;
+    if(definitely(domain.is_empty())) return;
+
+    std::vector<Bool> proved(codomain.size(),false);
+    FloatDPUpperBound magnitude={0u,dp};
+    for(SizeType j=0u;j<domain.size();++j)
+        magnitude+=domain[j].width();
+    FloatDPUpperBound previous=magnitude;
+
+    do {
+        solver.hull_reduce(domain,function,codomain);
+        if(definitely(domain.is_empty())) return;
+
+        for(SizeType i=0u;i<codomain.size();++i) {
+            if(proved[i]) {
+                if(statistics) {
+                    ++statistics->reused_certificates;
+                    statistics->saved_box_calls+=domain.size();
+                }
+                continue;
+            }
+            if(statistics) ++statistics->tests;
+            if(definitely(subset(apply(function[i],domain),codomain[i]))) {
+                proved[i]=true;
+                if(statistics) {
+                    ++statistics->certificates;
+                    statistics->saved_box_calls+=domain.size();
+                }
+                continue;
+            }
+            for(SizeType j=0u;j<domain.size();++j) {
+                if(statistics) ++statistics->executed_box_calls;
+                solver.box_reduce(domain,function[i],codomain[i],j);
+                if(definitely(domain.is_empty())) return;
+            }
+        }
+        previous=magnitude;
+        magnitude=0u;
+        for(SizeType j=0u;j<domain.size();++j)
+            magnitude+=domain[j].width();
+    } while(magnitude.raw()
+            < mul(near,previous.raw(),FloatDP(MINIMUM_REDUCTION,dp)));
+}
+
+
+} // namespace
 
 class TestConstraintSolver : public Ariadne::Testing::ContextFixture
 {
@@ -1198,6 +1268,111 @@ class TestConstraintSolver : public Ariadne::Testing::ContextFixture
         }
     }
 
+    Void test_certified_containment_reduce_experiment() {
+        ConstraintSolver solver;
+
+        // Independent of the 4D paving geometries and exported traces.
+        auto check=[&](char const* label, UpperBoxType const& initial,
+                       ValidatedVectorMultivariateFunction const& function,
+                       ExactBoxType const& codomain,
+                       Bool expect_proof=false,
+                       Bool expect_shaving=false,
+                       Bool expect_reuse=false) {
+            ARIADNE_TESTING_NOTE("[constraint-contained] " << label);
+            UpperBoxType baseline=initial;
+            Bool baseline_empty=solver.reduce(baseline,function,codomain);
+            UpperBoxType guarded=initial;
+            ContainedSkipStatistics stats;
+            reduce_contained_skip(solver,guarded,function,codomain,&stats);
+            // Demand exact contracted-domain identity, not just equal results.
+            ARIADNE_TESTING_EXPECT_SAME(guarded,baseline);
+            Bool guarded_empty=definitely(guarded.is_empty());
+            ARIADNE_TESTING_PROVE(guarded_empty==baseline_empty);
+            if(expect_proof) {
+                ARIADNE_TESTING_PROVE(stats.certificates>0u);
+                ARIADNE_TESTING_PROVE(stats.saved_box_calls>0u);
+            }
+            if(expect_shaving)
+                ARIADNE_TESTING_PROVE(stats.executed_box_calls>0u);
+            if(expect_reuse)
+                ARIADNE_TESTING_PROVE(stats.reused_certificates>0u);
+        };
+
+        auto one=ValidatedScalarMultivariateFunction::coordinates(1);
+        ValidatedVectorMultivariateFunction identity({one[0]});
+        check("entire identity range is contained",
+              ExactBoxType({{0.0_x,1.0_x}}),
+              identity,ExactBoxType({{-1.0_x,2.0_x}}),true);
+        check("equal closed endpoints count as contained",
+              ExactBoxType({{0.0_x,1.0_x}}),
+              identity,ExactBoxType({{0.0_x,1.0_x}}),true);
+        check("narrow codomain triggers repeated reduction rounds",
+              ExactBoxType({{0.0_x,1.0_x}}),
+              identity,ExactBoxType({{0.5_x,0.5625_x}}),
+              true,false,true);
+        check("hull proves disjointness before any box contractor",
+              ExactBoxType({{0.0_x,1.0_x}}),
+              identity,ExactBoxType({{2.0_x,3.0_x}}));
+        check("zero-width domain",
+              ExactBoxType({{0.5_x,0.5_x}}),
+              identity,ExactBoxType({{0.5_x,0.5_x}}));
+        check("already empty input",
+              ExactBoxType({ExactIntervalType::empty_interval()}),
+              identity,ExactBoxType({{0.0_x,1.0_x}}));
+
+        ValidatedVectorMultivariateFunction nonlinear({
+            one[0]*(1-one[0])
+        });
+        // Interval evaluation of x*(1-x) over [0,1] includes 0.32,
+        // whereas the true maximum is 0.25; shaving must remain active.
+        check("nonlinear dependency-hidden infeasibility",
+              ExactBoxType({{0.0_x,1.0_x}}),
+              nonlinear,ExactBoxType({{0.32_pr,0.32_pr}}),
+              false,true);
+
+        auto xy=ValidatedScalarMultivariateFunction::coordinates(2);
+        ValidatedVectorMultivariateFunction mixed({
+            xy[0],sqr(xy[0])+xy[1]
+        });
+        check("satisfied output followed by nonlinear constraint",
+              ExactBoxType({{-1.0_x,1.0_x},{0.0_x,1.0_x}}),
+              mixed,ExactBoxType({{-1.0_x,1.0_x},{0.5_x,0.75_x}}),
+              true);
+
+        // Deterministic 2D grid, not exported by the paving benchmark.
+        ExactIntervalType slices[]={
+            ExactIntervalType(0.0_x,0.25_x),
+            ExactIntervalType(0.25_x,0.5_x),
+            ExactIntervalType(0.5_x,0.75_x),
+            ExactIntervalType(0.75_x,1.0_x)
+        };
+        ValidatedVectorMultivariateFunction coupled({
+            xy[0]+2*xy[1],xy[0]*xy[1]
+        });
+        for(SizeType i=0u;i!=4u;++i) {
+            for(SizeType j=0u;j!=4u;++j) {
+                ARIADNE_TESTING_NOTE("[constraint-contained] coupled 2D grid "
+                                     << i << "," << j);
+                check("coupled linear and product constraints",
+                      ExactBoxType({slices[i],slices[j]}),
+                      coupled,ExactBoxType({{0.5_x,1.5_x},{0.0_x,0.25_x}}));
+            }
+        }
+
+        auto xyz=ValidatedScalarMultivariateFunction::coordinates(3);
+        ValidatedVectorMultivariateFunction three_dimensional({
+            xyz[0],xyz[0]+xyz[1]+xyz[2],sqr(xyz[1])+xyz[2]
+        });
+        check("three dimensions, three outputs, mixed dependencies",
+              ExactBoxType({
+                  {0.0_x,1.0_x},{0.0_x,1.0_x},{0.0_x,1.0_x}
+              }),
+              three_dimensional,
+              ExactBoxType({
+                  {0.0_x,1.0_x},{1.0_x,1.25_x},{0.25_x,1.0_x}
+              }),true);
+    }
+
     Void test_reduce_edge_cases() {
         ConstraintSolver solver;
         auto x=ValidatedScalarMultivariateFunction::coordinates(1);
@@ -1576,6 +1751,7 @@ int main(int argc, char** argv)
     ARIADNE_TESTING_ADD_TEST(TestConstraintSolver, test_lyapunov_reduce);
     ARIADNE_TESTING_ADD_TEST(TestConstraintSolver, test_propagate);
     ARIADNE_TESTING_ADD_TEST(TestConstraintSolver, test_precompiled_propagate);
+    ARIADNE_TESTING_ADD_TEST(TestConstraintSolver, test_certified_containment_reduce_experiment);
     ARIADNE_TESTING_ADD_TEST(TestConstraintSolver, test_reduce_edge_cases);
     ARIADNE_TESTING_ADD_TEST(TestConstraintSolver, test_check_feasibility);
     ARIADNE_TESTING_ADD_TEST(TestConstraintSolver, test_logging_branches);
