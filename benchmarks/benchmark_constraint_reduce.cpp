@@ -3699,8 +3699,6 @@ int main(int argc,char const* argv[]) {
             "constraint-solving-reduce-benchmark",
             benchmark_argument_parsers(selection)));
         if(not cli.acquire(argc,argv)) return 0;
-        if(ThreadManager::instance().concurrency()!=0u)
-            throw std::invalid_argument("constraint solver benchmark requires --concurrency 0");
         selection.warmups=cli.warmups();
         if(selection.samples<3u or selection.samples%2u==0u)
             throw std::invalid_argument("samples must be odd and >=3");
