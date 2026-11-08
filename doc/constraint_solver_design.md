@@ -1293,9 +1293,10 @@ can be added for correctness-only replay.
 
 ### P5 hybrid experiment — P1 first, adaptive resolution only after P1
 
-**Status (2026-11-08):** benchmark-only implementation. Compilation, full
-trace verification and timing measurements are pending; no measured
-performance improvement is yet claimed.
+**Status (2026-11-08):** benchmark-only implementation verified and timed
+on all five operator-provided d4/f3 shape traces. Neither the always-on
+nor the width-gated hybrid improves the five-shape aggregate; both
+remain diagnostic and **are rejected for production promotion**.
 
 The `--compare-hybrid-shaving` mode in the existing C++ executable
 compares three whole-query workloads on **all five geometries**
@@ -1362,7 +1363,78 @@ end-to-end cost all matter. Any candidate must ultimately pass
 general correctness and cross-platform tests, not just the
 rotated-ellipsoid-specific exact oracle.
 
+
+#### Five-shape hybrid replay results (operator macOS Release, 2026-11-08)
+
+The operator ran `--compare-hybrid-shaving --hybrid-width-threshold 3.0
+--adaptive-depth 8 --adaptive-resolution-budget 64 --samples 7
+--min-sample-ms 12 --concurrency 0`, using trace prefix
+`$HOME/Downloads/traces/outer`. The run completed baseline/frozen-scan
+and exported paving-bit comparisons across **9,167** d4/f3 queries.
+Both hybrid variants preserved the baseline separations and independently
+certified feasible centre witnesses, with no counterexamples in the
+rotated-ellipsoid exact geometry audit. These checks **do not
+establish complete exact feasible-set soundness** on the other four
+geometries.
+
+| Geometry | Queries | P1 empty | Always extra empty | Gate calls | Gated extra empty | Gated adaptive evaluations |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| aligned-box | 2,927 | 600 | 0 | 0 | 0 | 0 |
+| rotated-box | 2,591 | 576 | 0 | 25 | 0 | 6,800 |
+| aligned-ellipsoid | 1,127 | 372 | 0 | 27 | 0 | 1,956 |
+| rotated-ellipsoid | 1,055 | 296 | **16** | 45 | 0 | 2,826 |
+| ball | 1,467 | 414 | 0 | 69 | 0 | 4,046 |
+| **Total** | **9,167** | **2,258** | **16** | **166** | **0** | **15,628** |
+
+The always-on hybrid activates on **6,909 P1-nonempty queries** and
+obtains 1,579 strictly stronger contractions, including the 16
+additional certified empty results for rotated-ellipsoid. The gated
+hybrid activates on **166 / 6,909 (2.40%)** P1-nonempty queries,
+obtaining only 29 stronger contractions (27 aligned-ellipsoid,
+2 rotated-ellipsoid) and **no additional empty result**.
+The width-sum gate therefore removes all observed extra separation
+benefits. The always-on hybrid's 16 additional empties are **not**
+the 28 additional empties from the earlier standalone adaptive
+contractor on the original domain: applying P1 first changes the
+starting box and dyadic traversal/budget outcomes. Investigate
+the difference before attributing all missed cases to the gate.
+
+| Geometry | P1 median (ms) | Always median (ms) | Gated median (ms) | Always/P1 | Gated/P1 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| aligned-box | 51.7779 | 86.1488 | 51.3062 | 0.601x | 1.009x |
+| rotated-box | 207.4829 | 399.2769 | 216.5051 | 0.520x | 0.958x |
+| aligned-ellipsoid | 352.5925 | 479.5450 | 357.3459 | 0.735x | 0.987x |
+| rotated-ellipsoid | 594.9552 | 1205.7805 | 610.5833 | 0.493x | 0.974x |
+| ball | 429.7665 | 602.2568 | 438.8386 | 0.714x | 0.979x |
+| **Sum of medians** | **1636.5751** | **2773.0080** | **1674.5791** | **0.5902x** | **0.9773x** |
+
+Equal-weight **geometric mean** of five P1-relative speedups:
+Always **0.6047x**, Gated **0.9814x**. Relative to P1, the
+sum-of-medians time is **69.4% longer** for Always and **2.3%
+longer** for Gated. A 1.009x aligned-box gated speedup is tiny
+and should not be treated as conclusive without repetition.
+The aligned-box Always path reports *zero interval evaluations*
+while its runtime increases from 51.78 to 86.15 ms: interval
+evaluation counts alone omit substantial procedural overhead.
+P1 baseline dominates both aggregate timings.
+
+**Decision:** reject the two tested P1-first hybrids as
+performance candidates at these settings. Do not promote either
+to production. Simply lowering or tuning the width gate on the
+same five traces risks overfitting; the current gate is not a
+demonstrated predictor of valuable adaptive work. Next prioritize
+strength-preserving improvements to production P1 and a
+predictive, validated trigger designed on distinct training
+workloads and evaluated on held-out/adversarial traces.
+If investigating the hybrid further, inspect which 16 of the
+28 standalone rotated-ellipsoid extra-empty queries survive
+P1 precontraction, and measure end-to-end marginal cost.
+Retain the current benchmark as a negative control and
+preserve the original measurements.
+
 | 2026-11-08 | Added benchmark-only P1+adaptive-resolution hybrid (Always and width-gated variants, default threshold 3.0) on all five d4/f3 paving shape traces. Frozen baseline and paving-bit verification, subset/witness checks on all shapes, full exact rotated-ellipsoid preservation check. Whole-query independent median times, per-shape table, geometric-mean and weighted aggregate. Migrated executable argument parsing to LoggingCommandLineInterface and added LOGGING_PRINTLN structured reporting for the hybrid, following Numeric. | Build, five-shape correctness replay and timed run pending; no production algorithm changes. |
+
+| 2026-11-08 | Operator macOS Release five-shape P1-first hybrid replay (9,167 queries, prefix `$HOME/Downloads/traces/outer`, 7 samples, width gate 3.0): Always 6,909 activations, 16 extra empties, 1,579 stronger contractions; Gated 166 activations, 0 extra empties, 29 stronger. Geomean P1-relative speedups Always 0.6047x, Gated 0.9814x; sum-of-medians 1636.5751/2773.0080/1674.5791 ms (P1/Always/Gated). Validated P1/paving equivalence and no certified witness loss; exact convex check on rotated-ellipsoid only. | Reject both tested hybrid variants for production: Always +69.4% total time, Gated +2.3% with zero added separations. Preserve negative result, inspect 16-vs-28 path dependence and seek a cheaper strength-preserving method; do not overfit gate to same traces. |
 
 ### Update protocol
 
