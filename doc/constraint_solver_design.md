@@ -633,10 +633,62 @@ evaluations of the same dyadic cell, redundant testing from
 opposite ends, and the cost of stopping at uncertain leaves.
 A reuse-aware/shallow-first variant should be compared
 against P1 only after checking its exclusion proofs and
-separation claims on independent cases. Timed
-ADAPTIVE_SHAVING_COMPARE output was **not provided** in
-this run, so no measured speedup or slowdown can yet be
-claimed; evaluation counts alone are not wall times.
+separation claims on independent cases. The **timed**
+ADAPTIVE_SHAVING_COMPARE output was supplied later on
+2026-11-08; see the seven-sample medians below. Evaluation
+counts remain useful to explain the measured behavior, but
+are not interchangeable with elapsed time.
+
+#### P5 timed adaptive replay — macOS Release, 2026-11-08
+
+The operator measured independently calibrated medians of
+whole-trace sweeps with seven samples and one iteration per
+sample. The following are **speedups relative to current P1
+production `reduce()`**, not to the pre-P1 legacy contractor.
+
+| Shape | Production median (ms) | Budget-8 median (ms) | Budget-8 speedup | Resolution median (ms) | Resolution speedup |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| aligned-box | 51.92567 | 51.80229 | 1.002x | 51.61212 | 1.006x |
+| rotated-box | 206.25858 | 282.87367 | 0.729x | 457.71250 | 0.451x |
+| aligned-ellipsoid | 359.88067 | 493.93383 | 0.729x | 520.59354 | 0.691x |
+| rotated-ellipsoid | 589.35817 | 363.47425 | **1.621x** | 1629.36462 | 0.362x |
+| ball | 425.65896 | 592.16896 | 0.719x | 643.68737 | 0.661x |
+| **Five-shape geometric mean** | | | **0.909x** | | **0.596x** |
+
+The sum of the five medians is 1633.08 ms (production P1),
+1784.25 ms (budget-8), and 3302.97 ms (resolution).
+Their ratios differ from the geometric-mean speedups; neither
+should be presented as a direct measurement of end-to-end
+`paving::outer_approximation`.
+
+The **only material performance win** is
+`rotated-ellipsoid` under budget-8: **1.621x** faster.
+However, on this shape its contracted box is weaker in
+**324/1055** queries, stronger in only **24/1055**, and
+incomparable in another 36. The reduced elapsed time is
+therefore not an equivalent-strength speedup. This shape
+also shows a drop from 22,534 to 10,994 box calls and from
+107,526 to 85,208 interval evaluations, partly due to
+the different sequence of contractions and solver rounds.
+In contrast, the other nonlinear shapes become slower.
+
+The depth-8, cap-64 resolution approach is slower on every
+nontrivial shape; its extra contractions do not justify
+calling it a performance optimization. The **28 additional
+empty results** on rotated-ellipsoid should remain
+flagged as candidate-only until independently validated.
+The user-provided logs prove the benchmark's programmed
+invariants passed, not universal soundness or parity in
+contraction strength.
+
+**Decision:** reject both adaptive variants for production
+as-is. Do not tune the global slice count or switch to
+dyadic search solely because of the rotated-ellipsoid
+speedup. If investigating this family further, instrument
+repeated cell evaluations, overlapping passes, and
+evaluation-cost-to-contraction benefit on the affected
+output-coordinate pairs, and strengthen adversarial
+correctness tests before changing the contractor.
 
 Do **not** promote an adaptive variant merely because its
 loop is cheaper. Its contraction strength, certified
@@ -832,6 +884,8 @@ can be added for correctness-only replay.
 | 2026-11-08 | Fixed adaptive benchmark build failure: the solver's file-local `affine()` was not visible in the benchmark. Added a benchmark-local `adaptive_affine()` with identical interpolation arithmetic and removed an unused evaluation variable. | Source corrected; local rebuild/verification pending |
 
 | 2026-11-08 | P5 adaptive correctness-only replay passed baseline equivalence on 9,167 queries; budget-8 used 556,267 versus 357,582 production evaluations, resolution-cap-64 used 1,210,649. The resolution candidate returned 28 additional empty results on rotated-ellipsoid, not independently proved. | Keep both prototypes diagnostic; inspect duplicated dyadic evaluations and strengthen correctness validation before any promotion |
+
+| 2026-11-08 | Completed P5 seven-sample adaptive replay timings. Geomean P1-relative speedup: budget-8 0.909x, depth-8/cap-64 0.596x. Rotated-ellipsoid budget-8 alone achieved 1.621x but weakened 324/1055 boxes. | Reject both adaptive variants for production; retain diagnostic and investigate duplicated evaluations and contraction strength separately |
 
 ### Update protocol
 
