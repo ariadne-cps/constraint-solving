@@ -1447,28 +1447,25 @@ preserve the original measurements.
 
 ### P6 — Reuse compiled vector hull procedures (benchmark only)
 
-**Status (2026-11-08):** P6 correctness-only replay and seven-sample
-timing passed on all five d4/f3 paving shapes (9,167 queries).
-Per-query saved **9.05%** of the historical sum of P1 medians;
-Prepared-amortized saved an estimated **13.61%**. All replayed final
-boxes matched exactly. Following this positive experimental result,
-**the Per-query variant has been integrated internally into the
-production `ConstraintSolver::reduce()` implementation** without
-changing its public API or adding persistent cache state. The
-cross-query Prepared variant remains benchmark-only. **CI builds,
-general unit tests and a fresh operator replay/timing with the
-modified production library are still pending**; the historical
-performance results must not be presented as measurements of the
-new production binary.
+**Status (2026-11-08):** P6 is integrated into production and has
+passed a fresh operator build, five-shape exact-box replay and
+seven-sample benchmark on the actual optimized
+`ConstraintSolver::reduce()`. Across all **9,167** d4/f3
+paving trace queries, current production matches the frozen pre-P6
+P1, original full scan and exported trace separation bits.
+Measured current-production speedup over frozen pre-P6 P1 is
+**1.10403x** for the sum of five shape medians (9.42% less time)
+and **1.13633x** for the equally weighted geometric mean.
+Prepared remains benchmark-only. The general C++ test-suite and
+CI results have **not** been supplied in the operator log;
+trace replay equivalence is not a general correctness proof.
 
-The current production P1 `ConstraintSolver::reduce()`
-calls vector `hull_reduce()` in each contraction round;
-that overload constructs
-`Vector<Procedure<ValidatedNumber>>` afresh from the
-same immutable vector function. The benchmark's new
-`--compare-precompiled-hull` mode isolates the cost of
-these repeated procedure constructions while **preserving the
-whole P1 algorithm**. It compares:
+The **old, frozen pre-P6 P1** constructed a new
+`Vector<Procedure<ValidatedNumber>>` in each hull round.
+The current production `ConstraintSolver::reduce()`
+constructs it **once per query** and reuses it across rounds.
+The `--compare-precompiled-hull` benchmark isolates the
+effect of this change while preserving the whole P1 algorithm. It compares:
 
 1. **Pre-P6 P1:** frozen, benchmark-only pre-integration `reduce()`
    implementation (rebuild the vector procedure per hull round).
@@ -1486,9 +1483,10 @@ Each candidate follows the current production hull pass, certified
 containment guards, output and variable order, box-contractor
 calls, early-empty behavior, and 0.75 aggregate width stop rule.
 Before timing every query must satisfy **representation-exact
-final-box equality** with the frozen pre-P6 P1, actual optimized
-production P1, the per-query algorithm prototype and the earlier
-frozen full-scan reference, plus the original paving separation bits.
+final-box equality** between the frozen pre-P6 P1, the actual optimized
+production P1 and the benchmark-only Prepared variant, also
+matching the earlier frozen full-scan reference and exported
+paving separation bits.
 This is stronger than simply observing equal empty counts or
 soundness on one geometry. The verification operates on all five
 trace shapes (9,167 queries in the 2026-11-08 operator sample).
@@ -1602,18 +1600,15 @@ prepared-function owner and thread-safe sharing/precision
 policy. The two cannot be combined into one production
 claim without making that ownership choice.
 
-**Decision:** P6 is a promising production candidate,
-not yet production code. Prefer a small, internal Per-query
-P1 change first, preserving a frozen behavioral reference
-and extending regression tests to arbitrary functions,
-different dimensions and precision settings. Once that
-implementation is verified and measured repeatedly,
-evaluate a separate, explicit Prepared API for workloads
-which reuse an unchanged function across many queries;
-do not introduce a silent global cache. Keep the current
-P6 benchmark and its historical production baseline as
-regression controls. Additional timed runs would help
-quantify noise before a performance claim is finalized.
+**Historical decision (before integration):** P6 was selected
+as the Per-query production candidate. This decision has now
+been implemented and remeasured (see the post-integration results
+below). Keep the frozen historical baseline as a regression
+control. Further gains from Prepared require a separate
+explicitly owned, thread-safe compiled-function interface,
+not an implicit global cache. General tests and repeated
+independent timing runs are still desirable before treating
+the measured benefit as broadly reproducible.
 
 **Compiler diagnosis and correction (2026-11-08):** two attempted
 P6 constructions failed under AppleClang. The original direct
@@ -1647,15 +1642,15 @@ correctness-only and seven-sample timed replays completed
 successfully on all five shapes.
 
 **Design decision:** Per-query is integrated inside production P1
-as a deliberately minimal change with local, immutable procedure
-ownership. Prepared is *not* promoted: it still needs explicit
-compiled-function lifetime, thread-safety and precision design.
-The benchmark keeps frozen pre-P6 P1 independent of current
-production, so speedups cannot disappear when the reference
-advances. The reported historical 7-sample measurements were
-collected **before** integration; compile, unit-test, replay and
-timing verification on the new binary remain necessary. The
-recorded traces cannot prove equivalence for arbitrary inputs.
+with local, immutable procedure ownership. Prepared is *not*
+promoted: it still needs explicit compiled-function lifetime,
+thread-safety and precision design. The benchmark keeps frozen
+pre-P6 P1 independent of current production. The historical
+seven-sample results above were collected **before** integration;
+the later production benchmark below independently confirms the
+speedup. Complete C++ test-suite and CI status remain unverified
+by the supplied output, and the replay does not prove equivalence
+on arbitrary inputs.
 
 | 2026-11-08 | Added P6 benchmark-only reuse of precompiled vector hull procedures in P1: production rebuild-per-round vs compile once per query vs prepare once per function across all five d4/f3 paving traces. Exact final-box and exported separation equivalence required against both production and frozen full scan for every query. Numeric-style logging CLI report with per-shape medians, separate compilation median, five-shape geometric mean and workload-weighted totals. | Full C++ build and operator five-shape replay/timings pending; production and API unchanged, per-workload reuse requires explicitly prepared-function ownership. |
 
@@ -1711,27 +1706,63 @@ The original machine-readable timing keys remain intact with
 explicit `baseline=frozen_pre_p6_p1` and
 `per_query=current_production_reduce` labels.
 
-**Validation status:** source, tests, CI definitions, and benchmark
-have been updated, but no complete local/CI build, new five-shape
-exact-box replay, or new timings have yet been executed on this
-integration commit. Run unit tests first; then benchmark verification
-on all five operator traces; finally repeat seven-sample timings.
-The historical P6 gains motivate the change but do not by themselves
-validate this production commit.
+**Post-integration validation (operator, 2026-11-08):**
+the new production library and benchmark compiled and the
+correctness-only replay completed on all five trace shapes. All
+9,167 outputs were representation-exact matches with frozen pre-P6
+P1, frozen full scan and paving separation bits. Every
+`PRECOMPILED_HULL_VERIFIED` row reported
+`matched_pre_p6=true matched_current_production=true`.
+The operator then performed the separate seven-sample timed run;
+all five shape comparisons again passed. This validates the
+recorded workload and the specific production integration.
+The `test_constraint_solver` suite and CI job results have
+not been provided; do not mark them green without evidence.
+
+#### P6 post-integration performance (operator, 2026-11-08)
+
+Same five d4/f3 shape traces under
+`$HOME/Downloads/traces/outer`, with
+`--compare-precompiled-hull --samples 7 --min-sample-ms 12
+--concurrency 0`. `p1_ms` is the frozen **old** P1,
+`per_query_ms` is actual **new production** P1, and
+`prepared_ms` is the benchmark-only shared-procedure mode.
+
+| Shape | Old P1 median ms | New P1 median ms | Prepared-hot median ms | Single build median ms | New / old speedup | Prepared-amortized / old speedup |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| aligned-box | 52.64200 | 41.44163 | 26.60383 | 0.00288 | 1.27027x | 1.97852x |
+| rotated-box | 209.05992 | 180.70729 | 152.53046 | 0.00836 | 1.15690x | 1.37054x |
+| aligned-ellipsoid | 354.20929 | 331.33950 | 322.76217 | 0.00529 | 1.06902x | 1.09741x |
+| rotated-ellipsoid | 610.72821 | 553.60563 | 540.76792 | 0.00816 | 1.10318x | 1.12936x |
+| ball | 441.68088 | 404.01954 | 392.08371 | 0.00527 | 1.09322x | 1.12648x |
+| **Sum of medians** | **1668.32029** | **1511.11358** | **1434.74808** | **0.02997** | **1.10403x** | **1.16277x** |
+
+The new production reducer saves **157.20671 ms / 9.42%**
+on the sum of independently calibrated per-shape medians.
+The benchmark-only Prepared-amortized estimate is
+**1434.77805 ms**, another **76.33553 ms / 5.05%**
+below current production, inclusive of the separately
+calibrated single-procedure-build estimate for each shape.
+Equal-shape-weight geometric-mean speedups are
+**1.13633x** (new production P1) and
+**1.30506x** (Prepared-amortized) relative to frozen old P1.
+These aggregates are not paired end-to-end program runtimes.
+The separately calibrated one-build timings are not a
+complete cold-start measurement.
+
+**Conclusion:** retain the already integrated Per-query optimization:
+it improves all five measured geometries while preserving the
+exact final box for every traced query. Do not promote
+cross-query Prepared merely on this evidence. Obtain
+general unit-test and CI confirmation, then evaluate
+repeated independent runs and workloads outside the five
+recorded geometries before considering broader performance
+or correctness claims.
 
 ```sh
 git pull --ff-only
 cmake --build build-release --target test_constraint_solver benchmark_constraint_reduce
-ctest --test-dir build-release -R '^test_constraint_solver
-For every follow-up investigation: add a dated row to the
-decision log; revise **Current production reduction design**
-only when production code actually changes; record new
-measurements with environment/trace provenance; and update
-the **status and risks** of the affected proposal.
-Commit these documentation changes alongside the relevant
-benchmark/solver changes, rather than leaving design history
-in a chat or solely in `paving/doc`.
- --output-on-failure
+ctest --test-dir build-release -R '^test_constraint_solver$' --output-on-failure
 ./build-release/benchmarks/benchmark_constraint_reduce \
   --trace-prefix "$HOME/Downloads/traces/outer" \
   --compare-precompiled-hull --verify-only --concurrency 0
@@ -1739,8 +1770,9 @@ in a chat or solely in `paving/doc`.
   --trace-prefix "$HOME/Downloads/traces/outer" \
   --compare-precompiled-hull --samples 7 --min-sample-ms 12 --concurrency 0
 ```
-
 | 2026-11-08 | Promoted the P6 Per-query prepared vector hull into production `ConstraintSolver::reduce()`: construct one `Vector<ValidatedProcedure>` per nonempty call and reuse across hull rounds, keeping the original schedule, local certification cache and public API unchanged. P6 benchmark now contains a frozen pre-P6 P1 comparator, checks actual production P1 against pre-P6 P1 and full scan on all five shapes, and times the real production reducer. Added alternating-codomain/different-function unit regression; Ubuntu/macOS Release CI compile the benchmark to catch specialized-procedure API mistakes. | Production integration staged for validation; fresh full build, C++ test suite, all-shape equality replay and calibrated timings pending. Prepared cross-query variant remains benchmark-only. |
+
+| 2026-11-08 | Operator post-integration P6 validation: successful C++ benchmark build, correctness-only replay and seven-sample timed replay on all five d4/f3 shapes (9,167 queries at `$HOME/Downloads/traces/outer`). Actual production Per-query matches frozen pre-P6 P1/full scan/paving bits exactly on every query. Old P1 summed medians 1668.32029 ms; new production 1511.11358 ms (1.10403x, 9.42% less time); Prepared-hot 1434.74808 ms, single-build estimates sum 0.02997 ms, Prepared-amortized 1434.77805 ms (1.16277x vs old P1). New production 1.13633x geometric-mean speedup; all shapes improve. Also repaired a corrupted validation command block in this journal. | Retain Per-query production optimization; C++ unit-test suite and CI outcomes not supplied in operator log. Prepared remains benchmark-only; avoid general correctness or cold-start performance claims from these traces alone. |
 
 ### Update protocol
 
