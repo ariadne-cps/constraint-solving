@@ -53,6 +53,7 @@ struct Selection {
     Bool compare_adaptive_shaving=false;
     Bool compare_adaptive_cache=false;
     Bool compare_hybrid_shaving=false;
+    Bool compare_precompiled_hull=false;
     Bool audit_ellipsoid_self_test=false;
     Bool audit_resolution_incomparables=false;
     Bool audit_all_ellipsoid_contractions=false;
@@ -186,6 +187,9 @@ List<ArgumentParser> benchmark_argument_parsers(Selection& s) {
     flag("compare-hybrid-shaving",
          "Compare P1, P1+resolution and width-gated P1+resolution",
          s.compare_hybrid_shaving);
+    flag("compare-precompiled-hull",
+         "Compare P1 with per-query and per-workload cached vector hull procedures",
+         s.compare_precompiled_hull);
     flag("audit-ellipsoid-self-test","Self-test exact rational oracle",
          s.audit_ellipsoid_self_test);
     flag("audit-resolution-incomparables",
@@ -2992,6 +2996,285 @@ void print_hybrid_report(
         <<" These are separate calibrated sweeps, not paired timings.")
 }
 
+// P6 (benchmark only): hold the vector hull procedure constant instead of
+// rebuilding it on every iteration of the P1 hull/box reduction loop.
+// This changes no contractor order, proof test, or stopping rule.
+// Vector<ValidatedProcedure> construction from the validated vector function
+// is the same constructor production uses in hull_reduce(function).
+struct PreparedHullStatistics {
+    SizeType calls=0u;
+    SizeType hull_rounds=0u;
+    SizeType guard_tests=0u;
+    SizeType certificates=0u;
+    SizeType cached_certificates=0u;
+    SizeType box_calls=0u;
+};
+
+Bool reduce_with_precompiled_hull(
+        ConstraintSolver const& solver,UpperBoxType& domain,
+        ValidatedVectorMultivariateFunction const& function,
+        ExactBoxType const& codomain,
+        Vector<ValidatedProcedure> const& hull_procedure,
+        PreparedHullStatistics* stats=nullptr) {
+    const ExactDouble MINIMUM_REDUCTION=0.75_x;
+    if(stats) ++stats->calls;
+    if(definitely(domain.is_empty())) return true;
+
+    std::vector<Bool> certified_satisfied(codomain.size(),false);
+    FloatDPUpperBound domain_magnitude={0u,dp};
+    for(SizeType j=0u;j<domain.size();++j)
+        domain_magnitude+=domain[j].width();
+    FloatDPUpperBound old_domain_magnitude=domain_magnitude;
+
+    do {
+        if(stats) ++stats->hull_rounds;
+        solver.hull_reduce(domain,hull_procedure,codomain);
+        if(definitely(domain.is_empty())) return true;
+
+        for(SizeType i=0u;i<codomain.size();++i) {
+            if(certified_satisfied[i]) {
+                if(stats) ++stats->cached_certificates;
+                continue;
+            }
+            if(stats) ++stats->guard_tests;
+            if(definitely(subset(Ariadne::apply(function[i],domain),
+                                 codomain[i]))) {
+                certified_satisfied[i]=true;
+                if(stats) ++stats->certificates;
+                continue;
+            }
+            for(SizeType j=0u;j<domain.size();++j) {
+                if(stats) ++stats->box_calls;
+                solver.box_reduce(domain,function[i],codomain[i],j);
+                if(definitely(domain.is_empty())) return true;
+            }
+        }
+        old_domain_magnitude=domain_magnitude;
+        domain_magnitude=0u;
+        for(SizeType j=0u;j<domain.size();++j)
+            domain_magnitude+=domain[j].width();
+    } while(domain_magnitude.raw()
+            < mul(near,old_domain_magnitude.raw(),
+                  FloatDP(MINIMUM_REDUCTION,dp)));
+    return false;
+}
+
+struct PreparedHullRow {
+    std::string shape;
+    SizeType queries=0u;
+    SizeType separated=0u;
+    PreparedHullStatistics schedule;
+    double p1_ms=0.0;
+    double per_query_ms=0.0;
+    double prepared_ms=0.0;
+    double compile_once_ms=0.0;
+    unsigned p1_iterations=0u;
+    unsigned per_query_iterations=0u;
+    unsigned prepared_iterations=0u;
+};
+
+PreparedHullRow compare_precompiled_hull(
+        Selection const& selection,std::string const& shape) {
+    SolverProblem problem=make_problem(shape);
+    auto const trace=read_adaptive_trace(selection.trace_prefix,shape);
+    std::vector<ExactBoxType> codomains;
+    codomains.reserve(trace.size());
+    for(auto const& record:trace) {
+        ExactBoxType codomain=problem.codomains.front();
+        for(SizeType j=0u;j<4u;++j) codomain[j]=record.box[j];
+        codomains.push_back(std::move(codomain));
+    }
+    ConstraintSolver solver;
+    // Prepared-function lifetime covers all queries in this benchmark
+    // workload. No procedures cross function/shape/precision boundaries.
+    Vector<ValidatedProcedure> const prepared(problem.function);
+    PreparedHullRow row;
+    row.shape=shape;
+    row.queries=trace.size();
+    for(SizeType q=0u;q<trace.size();++q) {
+        auto const& codomain=codomains[q];
+        UpperBoxType baseline=problem.initial_domain;
+        solver.reduce(baseline,problem.function,codomain);
+        UpperBoxType legacy=problem.initial_domain;
+        reduce_full_scan_reference(solver,legacy,problem.function,codomain);
+        if(not same(baseline,legacy))
+            throw std::runtime_error(
+                "P6 production differs from frozen full scan shape="
+                +shape+" query="+std::to_string(q));
+
+        UpperBoxType per_query=problem.initial_domain;
+        Vector<ValidatedProcedure> const local(problem.function);
+        reduce_with_precompiled_hull(
+            solver,per_query,problem.function,codomain,local);
+        UpperBoxType precompiled=problem.initial_domain;
+        reduce_with_precompiled_hull(
+            solver,precompiled,problem.function,codomain,prepared,
+            &row.schedule);
+        if(not same(baseline,per_query)
+           or not same(baseline,precompiled)) {
+            throw std::runtime_error(
+                "P6 prepared hull changed exact final box shape="+shape
+                +" query="+std::to_string(q));
+        }
+        Bool const empty=definitely(baseline.is_empty());
+        if(empty!=trace[q].separated
+           or empty!=definitely(per_query.is_empty())
+           or empty!=definitely(precompiled.is_empty()))
+            throw std::runtime_error(
+                "P6 prepared hull changed certified paving separation"
+                " shape="+shape+" query="+std::to_string(q));
+        row.separated+=static_cast<SizeType>(empty);
+    }
+    if(row.schedule.calls!=trace.size()
+       or row.schedule.hull_rounds<trace.size())
+        throw std::runtime_error("inconsistent P6 prepared hull counters");
+    LOGGING_PRINTLN("PRECOMPILED_HULL_VERIFIED shape="<<shape
+        <<" queries="<<row.queries
+        <<" separated="<<row.separated
+        <<" hull_rounds="<<row.schedule.hull_rounds
+        <<" guard_tests="<<row.schedule.guard_tests
+        <<" certificates="<<row.schedule.certificates
+        <<" reused_certificates="<<row.schedule.cached_certificates
+        <<" box_calls="<<row.schedule.box_calls
+        <<" matched_p1=true matched_legacy=true matched_trace=true")
+    if(selection.verify_only) return row;
+
+    // Timed workloads each include all query setup/reduction/cleanup.
+    // "per_query" builds once per reduce() call but reuses across rounds.
+    // "prepared" reuses one vector of procedures for the entire shape.
+    auto timed=[&](unsigned variant)->SizeType {
+        SizeType separated=0u;
+        for(auto const& codomain:codomains) {
+            UpperBoxType domain=problem.initial_domain;
+            if(variant==0u) {
+                solver.reduce(domain,problem.function,codomain);
+            } else if(variant==1u) {
+                Vector<ValidatedProcedure> const local(problem.function);
+                reduce_with_precompiled_hull(
+                    solver,domain,problem.function,codomain,local);
+            } else {
+                reduce_with_precompiled_hull(
+                    solver,domain,problem.function,codomain,prepared);
+            }
+            separated+=static_cast<SizeType>(definitely(domain.is_empty()));
+            keep_alive(domain);
+        }
+        return separated;
+    };
+    for(unsigned variant=0u;variant<3u;++variant)
+        if(timed(variant)!=row.separated)
+            throw std::runtime_error(
+                "P6 timed query checksum disagrees with verification"
+                " shape="+shape+" variant="+std::to_string(variant));
+
+    Timing const p1=median_ms([&]{return timed(0u);},selection);
+    Timing const per_query=median_ms([&]{return timed(1u);},selection);
+    Timing const shared=median_ms([&]{return timed(2u);},selection);
+    // A separate calibrated one-off constructor estimate: never silently
+    // equate the warmed prepared benchmark with end-to-end cold startup.
+    Timing const build=median_ms([&]()->SizeType {
+        Vector<ValidatedProcedure> const local(problem.function);
+        keep_alive(local);
+        return local.size();
+    },selection);
+    row.p1_ms=p1.milliseconds;
+    row.per_query_ms=per_query.milliseconds;
+    row.prepared_ms=shared.milliseconds;
+    row.compile_once_ms=build.milliseconds;
+    row.p1_iterations=p1.iterations;
+    row.per_query_iterations=per_query.iterations;
+    row.prepared_iterations=shared.iterations;
+    for(double const x:{row.p1_ms,row.per_query_ms,
+                        row.prepared_ms,row.compile_once_ms})
+        if(not std::isfinite(x) or x<=0.0)
+            throw std::runtime_error(
+                "P6 invalid timing shape="+shape);
+    LOGGING_PRINTLN("PRECOMPILED_HULL_COMPARE shape="<<shape
+        <<" queries="<<row.queries
+        <<" p1_ms="<<std::fixed<<std::setprecision(5)<<row.p1_ms
+        <<" per_query_ms="<<row.per_query_ms
+        <<" prepared_ms="<<row.prepared_ms
+        <<" compile_once_ms="<<row.compile_once_ms
+        <<" per_query_speedup="<<(row.p1_ms/row.per_query_ms)
+        <<" prepared_hot_speedup="<<(row.p1_ms/row.prepared_ms)
+        <<" prepared_amortized_speedup="
+              <<(row.p1_ms/(row.prepared_ms+row.compile_once_ms))
+        <<" samples="<<selection.samples)
+    return row;
+}
+
+void print_precompiled_hull_report(
+        std::vector<PreparedHullRow> const& rows,Selection const& selection) {
+    if(rows.empty()) throw std::runtime_error("empty P6 benchmark");
+    LOGGING_PRINTLN(" ")
+    LOGGING_PRINTLN("P1 / vector-hull procedure reuse | d=4 f=3"
+                   <<" | shapes="<<rows.size()
+                   <<" | samples="<<selection.samples)
+    LOGGING_PRINTLN("Every retained box and certified separation agrees"
+                   " exactly with P1 and the frozen full scan on each trace.")
+    if(selection.verify_only) {
+        LOGGING_PRINTLN("Correctness-only replay; timing not collected.")
+        return;
+    }
+
+    LOGGING_PRINTLN(std::string(112u,'='))
+    LOGGING_PRINTLN(std::left<<std::setw(20)<<"Shape"
+        <<std::right<<std::setw(13)<<"P1 (ms)"
+        <<std::setw(17)<<"Per-query (ms)"
+        <<std::setw(17)<<"Prepared (ms)"
+        <<std::setw(17)<<"Build (ms)"
+        <<std::setw(14)<<"Query/P1"
+        <<std::setw(14)<<"Warm/P1")
+    LOGGING_PRINTLN(std::string(112u,'-'))
+    double log_query=0.0,log_warm=0.0,log_amortized=0.0;
+    double total_p1=0.0,total_query=0.0,total_prepared=0.0;
+    double total_build=0.0;
+    SizeType total_queries=0u,total_rounds=0u;
+    for(auto const& row:rows) {
+        total_p1+=row.p1_ms;
+        total_query+=row.per_query_ms;
+        total_prepared+=row.prepared_ms;
+        total_build+=row.compile_once_ms;
+        total_queries+=row.queries;
+        total_rounds+=row.schedule.hull_rounds;
+        log_query+=std::log(row.p1_ms/row.per_query_ms);
+        log_warm+=std::log(row.p1_ms/row.prepared_ms);
+        log_amortized+=std::log(
+            row.p1_ms/(row.prepared_ms+row.compile_once_ms));
+        LOGGING_PRINTLN(std::left<<std::setw(20)<<row.shape
+            <<std::right<<std::fixed<<std::setprecision(4)
+            <<std::setw(13)<<row.p1_ms
+            <<std::setw(17)<<row.per_query_ms
+            <<std::setw(17)<<row.prepared_ms
+            <<std::setw(17)<<row.compile_once_ms
+            <<std::setprecision(3)
+            <<std::setw(13)<<(row.p1_ms/row.per_query_ms)<<"x"
+            <<std::setw(13)<<(row.p1_ms/row.prepared_ms)<<"x")
+    }
+    double const n=static_cast<double>(rows.size());
+    LOGGING_PRINTLN(std::string(112u,'='))
+    LOGGING_PRINTLN("PRECOMPILED_HULL_AGGREGATE shapes="<<rows.size()
+        <<" queries="<<total_queries<<" hull_rounds="<<total_rounds
+        <<" p1_sum_ms="<<std::fixed<<std::setprecision(5)<<total_p1
+        <<" per_query_sum_ms="<<total_query
+        <<" prepared_sum_ms="<<total_prepared
+        <<" compile_once_sum_ms="<<total_build
+        <<" prepared_amortized_sum_ms="<<(total_prepared+total_build)
+        <<" per_query_geomean_speedup="<<std::exp(log_query/n)
+        <<" prepared_hot_geomean_speedup="<<std::exp(log_warm/n)
+        <<" prepared_amortized_geomean_speedup="<<std::exp(log_amortized/n)
+        <<" per_query_total_speedup="<<(total_p1/total_query)
+        <<" prepared_hot_total_speedup="<<(total_p1/total_prepared)
+        <<" prepared_amortized_total_speedup="
+            <<(total_p1/(total_prepared+total_build)))
+    LOGGING_PRINTLN("Speedup >1 means faster than production P1."
+                   " Per-query timing includes its procedure build."
+                   " Prepared-hot timing excludes setup; amortized adds"
+                   " the separately calibrated one-build median per shape."
+                   " Sums of independently measured medians are not paired"
+                   " whole-program timings.")
+}
+
 struct Datum {
     std::string shape;
     std::string operation;
@@ -3257,6 +3540,7 @@ int main(int argc,char const* argv[]) {
                or selection.compare_adaptive_shaving
                or selection.compare_adaptive_cache
                or selection.compare_hybrid_shaving
+               or selection.compare_precompiled_hull
                or selection.audit_resolution_incomparables
                or selection.audit_all_ellipsoid_contractions)
                 throw std::invalid_argument(
@@ -3290,11 +3574,23 @@ int main(int argc,char const* argv[]) {
             +static_cast<unsigned>(selection.profile_residual_shaving)
             +static_cast<unsigned>(selection.compare_adaptive_shaving)
             +static_cast<unsigned>(selection.compare_adaptive_cache)
-            +static_cast<unsigned>(selection.compare_hybrid_shaving);
+            +static_cast<unsigned>(selection.compare_hybrid_shaving)
+            +static_cast<unsigned>(selection.compare_precompiled_hull);
         if(modes>1u)
             throw std::invalid_argument(
                 "comparison and profiling modes are mutually exclusive");
         if(not selection.trace_prefix.empty()) {
+            if(selection.compare_precompiled_hull) {
+                std::vector<PreparedHullRow> rows;
+                rows.reserve(selection.shapes.size());
+                for(auto const& shape:selection.shapes) {
+                    LOGGING_PRINTLN("Measuring precompiled hull: "<<shape<<" ...")
+                    rows.push_back(compare_precompiled_hull(selection,shape));
+                    LOGGING_PRINTLN("Completed precompiled hull: "<<shape)
+                }
+                print_precompiled_hull_report(rows,selection);
+                return 0;
+            }
             if(selection.compare_hybrid_shaving) {
                 std::vector<HybridRow> rows;
                 rows.reserve(selection.shapes.size());

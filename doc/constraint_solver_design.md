@@ -1436,6 +1436,84 @@ preserve the original measurements.
 
 | 2026-11-08 | Operator macOS Release five-shape P1-first hybrid replay (9,167 queries, prefix `$HOME/Downloads/traces/outer`, 7 samples, width gate 3.0): Always 6,909 activations, 16 extra empties, 1,579 stronger contractions; Gated 166 activations, 0 extra empties, 29 stronger. Geomean P1-relative speedups Always 0.6047x, Gated 0.9814x; sum-of-medians 1636.5751/2773.0080/1674.5791 ms (P1/Always/Gated). Validated P1/paving equivalence and no certified witness loss; exact convex check on rotated-ellipsoid only. | Reject both tested hybrid variants for production: Always +69.4% total time, Gated +2.3% with zero added separations. Preserve negative result, inspect 16-vs-28 path dependence and seek a cheaper strength-preserving method; do not overfit gate to same traces. |
 
+
+### P6 — Reuse compiled vector hull procedures (benchmark only)
+
+**Status (2026-11-08):** implementation in the existing standalone C++
+benchmark; exact-box verification and operator timings on the five
+d4/f3 paving traces are **pending**. No changes to the production
+solver or its public API.
+
+The current production P1 `ConstraintSolver::reduce()`
+calls vector `hull_reduce()` in each contraction round;
+that overload constructs
+`Vector<Procedure<ValidatedNumber>>` afresh from the
+same immutable vector function. The benchmark's new
+`--compare-precompiled-hull` mode isolates the cost of
+these repeated procedure constructions while **preserving the
+whole P1 algorithm**. It compares:
+
+1. **P1:** production `reduce()` (rebuild per hull round).
+2. **Per-query:** construct one vector of validated procedures per
+   `reduce` call; reuse it across all hull rounds in
+   that call. The construction is **included** in measured time.
+3. **Prepared:** construct one vector from the immutable function
+   per shape/workload, reuse it across all queries and rounds.
+   Timed warm sweeps exclude the one-time construction; report
+   its separately calibrated median and add it to the workload
+   median as an explicitly *estimated* amortized figure.
+
+Each candidate follows the current production hull pass, certified
+containment guards, output and variable order, box-contractor
+calls, early-empty behavior, and 0.75 aggregate width stop rule.
+Before timing every query must satisfy **representation-exact
+final-box equality** with production P1 and the frozen pre-P1
+full-scan reference, plus the original paving separation bits.
+This is stronger than simply observing equal empty counts or
+soundness on one geometry. The verification operates on all five
+trace shapes (9,167 queries in the 2026-11-08 operator sample).
+
+Outputs use the same `LoggingCommandLineInterface`
+and `LOGGING_PRINTLN` reporting conventions as Numeric:
+`PRECOMPILED_HULL_VERIFIED` per shape,
+`PRECOMPILED_HULL_COMPARE` per shape,
+and a formatted table with
+`PRECOMPILED_HULL_AGGREGATE`. The aggregate reports
+geometric-mean P1-relative speedups (equal shape weight)
+and ratios of sums of independently calibrated medians
+(workload weight). The separately timed procedure construction
+is not a whole-program cold-start time and must not be
+silently conflated with a warm/prepared sweep.
+
+```sh
+git pull --ff-only
+cmake --build build-release --target benchmark_constraint_reduce
+
+# Validate all five shapes (default selection)
+./build-release/benchmarks/benchmark_constraint_reduce \
+  --trace-prefix "$HOME/Downloads/traces/outer" \
+  --compare-precompiled-hull \
+  --verify-only --concurrency 0
+
+# Timed, all five shapes
+./build-release/benchmarks/benchmark_constraint_reduce \
+  --trace-prefix "$HOME/Downloads/traces/outer" \
+  --compare-precompiled-hull \
+  --samples 7 --min-sample-ms 12 --concurrency 0
+```
+
+**Design decision:** even if procedure preparation proves faster,
+cross-query reuse would require an explicitly prepared function
+lifetime/interface and a review of ownership, compilation costs,
+thread safety and precision. Only the per-query variant is
+realizable without such an API. Promotion of either variant is
+contingent on exact replay equality, a repeatable five-shape
+end-to-end improvement and adversarial regression coverage.
+This experiment does *not* claim general correctness based only
+on the fixed replay traces.
+
+| 2026-11-08 | Added P6 benchmark-only reuse of precompiled vector hull procedures in P1: production rebuild-per-round vs compile once per query vs prepare once per function across all five d4/f3 paving traces. Exact final-box and exported separation equivalence required against both production and frozen full scan for every query. Numeric-style logging CLI report with per-shape medians, separate compilation median, five-shape geometric mean and workload-weighted totals. | Full C++ build and operator five-shape replay/timings pending; production and API unchanged, per-workload reuse requires explicitly prepared-function ownership. |
+
 ### Update protocol
 
 For every follow-up investigation: add a dated row to the
