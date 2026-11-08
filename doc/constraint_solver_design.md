@@ -954,16 +954,21 @@ empty_geometry=12 feasible_geometry=0
 production_loss_cases=0 candidate_loss_cases=0
 cut_faces_checked=0`. Here `both_sound=0` counts **no feasible
 geometry cases inspected** rather than an unsound result.
-Set-theoretically, the resolution comparison has 437 equivalent
-boxes (425 identical representations + 12 equivalent empty sets),
-618 strictly stronger boxes, zero weaker boxes and zero genuinely
-incomparable boxes.
+At the time this narrower audit was first interpreted, we
+incorrectly counted only the 12 `incomparable` empty-box
+representations as semantic equalities, yielding 437 equal and
+618 stronger. The subsequent **all-query set-semantic comparison**
+corrects this to **483 equal, 572 strictly stronger, 0 weaker,
+0 incomparable**: another 46 historically "stronger" outcomes
+also represent the same empty set on both sides. These corrected
+counts supersede the earlier interpretation; the original
+representation-based counters are retained for historical comparison.
 
 **Remaining limitation:** this incomparable-only audit checked
 no cut faces on feasible geometry. It does not establish that
 nonempty candidate contractions preserve every feasible point.
 
-#### Full exact feasibility-preservation audit (opt-in, pending replay)
+#### Full exact feasibility-preservation audit (opt-in, verified on operator trace)
 
 The benchmark now supports `--audit-all-ellipsoid-contractions` in
 the existing C++ `--compare-adaptive-shaving` mode for
@@ -1004,22 +1009,71 @@ cmake --build build-release --target benchmark_constraint_reduce
   --verify-only --concurrency 0
 ```
 
-**Status:** source and documentation updated; full build, self-test
-and 1,055-box operator replay are still pending. The previously
-reported 28 exact emptiness confirmations and 12 empty-box
-equivalences are verified, but these facts alone do not establish
-point preservation on all nonempty queries or generic soundness.
+**Operator replay (macOS Release, 2026-11-08):** the user rebuilt
+and ran the C++ benchmark on 1,055 rotated-ellipsoid d4/f3 boxes
+with `--trace-prefix "$HOME/Downloads/traces/outer"`,
+`--compare-adaptive-shaving --audit-all-ellipsoid-contractions
+--verify-only --concurrency 0`. Exactly **360 query geometries were
+empty and 695 were feasible**. The audit completed successfully:
+
+| Exact oracle measurement | P1 production | Adaptive budget-8 | Adaptive resolution depth-8/cap-64 |
+| --- | ---: | ---: | ---: |
+| Empty results on the 360 infeasible queries | 296 | 296 | **324** |
+| Unseparated infeasible queries | 64 | 64 | 36 |
+| Nonempty results on 695 feasible queries | 695 | 695 | 695 |
+| Incorrectly empty feasible queries | 0 | 0 | 0 |
+| Exact open exterior half-slabs checked | 1,500 | 1,444 | 1,682 |
+| Feasible-point loss cases | **0** | **0** | **0** |
+
+All **4,626** audited cut half-slabs were free of feasible
+points, including the cases with contracted nonempty results.
+The independent exact emptiness audit also reconfirmed
+**28/28** resolution-only empty claims and zero baseline
+false-positive separations. The diagnostic output confirms
+the following *semantic* comparisons (not representation
+comparisons), on the same 1,055 queries:
+
+| Set relation to production | Budget-8 | Resolution cap-64 |
+| --- | ---: | ---: |
+| Equal | 729 | 483 |
+| Strictly stronger | 24 | **572** |
+| Strictly weaker | **302** | 0 |
+| Incomparable | 0 | 0 |
+
+These supersede the earlier mistaken resolution figures
+of 437 equal / 618 stronger. The old
+`ADAPTIVE_SHAVING_VERIFIED` representation-level counts
+remain unchanged by design. In particular, not all empty
+box representations were counted equal by the narrower
+incomparability-only diagnostic.
+
+**Scope:** this establishes exact feasible-set preservation on
+the 1,055 rotated-ellipsoid trace queries for all three
+contractors; it is *not* a proof of general contractor
+soundness for arbitrary functions, traces or coordinates.
+The audited resolution prototype still used 448,994 box
+evaluations on this shape versus 85,208 for budget-8,
+and its earlier timed performance was considerably worse
+than production. These are adaptive instrumentation
+counters; they should not be confused with production
+function-evaluation counts. No promotion to production
+is warranted on the present performance evidence.
 
 **Decision:** retain the memoization diagnostic for reuse
 studies but do not insert it into production. The specific
 28 additional emptiness claims passed independent exact
 geometry validation and all 12 apparent resolution
 incomparabilities were artifacts of empty-box representation.
-Next establish point-preserving contraction soundness on
-every feasible rotated-ellipsoid trace query, inspect the
-general dyadic partition/exclusion invariants, and seek a
-strategy that minimizes evaluation cost **without sacrificing
-contraction strength** on nonlinear inputs.
+Point-preserving contraction soundness is now independently
+established for all 695 feasible rotated-ellipsoid trace queries.
+Next inspect the *general* dyadic partition/exclusion
+invariants beyond this particular quadratic, and explore
+strength-preserving, cheaper variants on the other nonlinear
+geometries. A promising benchmark-only comparison is a
+production-first hybrid (P1, followed conditionally by
+adaptive resolution) with explicit marginal evaluation
+cost; it should not be promoted without full regression
+coverage and measured gains.
 
 Do **not** promote an adaptive variant merely because its
 loop is cheaper. Its contraction strength, certified
@@ -1233,6 +1287,8 @@ can be added for correctness-only replay.
 
 | 2026-11-08 | Operator replay of the repaired incomparable audit on the rotated-ellipsoid trace: all 12 historical incomparable pairs are both empty, with exactly empty query geometry, zero truly incomparable nonempty boxes and no geometric face checks; the set-semantic comparison is 437 equal, 618 stronger, 0 weaker, 0 incomparable. | Resolve the incomparable anomaly as an empty-box representation artifact; no evidence yet about point preservation of feasible nonempty contractions. |
 | 2026-11-08 | Added opt-in full exact rational contraction audit on every rotated-ellipsoid query for production, budget-8 and resolution; reports feasible-point losses with exact witnesses, plus set-semantic comparison counts independent of empty-box representation. | Build and operator replay pending; no changes to the production contractor. |
+
+| 2026-11-08 | Operator macOS Release C++ full rational audit completed on 1,055 rotated-ellipsoid d4/f3 trace queries at `$HOME/Downloads/traces/outer`: 360 empty, 695 feasible. P1/budget-8/resolution evaluated respectively 1,500/1,444/1,682 exact cut half-slabs (4,626 total); all three show 0 lost faces and 0 lost cases. Sound empty-result counts 296/296/324, with 28/28 resolution extras exactly proved. Corrected semantic set comparisons: budget 729 equal, 24 stronger, 302 weaker, 0 incomparable; resolution 483 equal, 572 stronger, 0 weaker, 0 incomparable (supersedes earlier incorrect 437/618 interpretation). | Close trace-specific feasible-point preservation validation, no production promotion; investigate cheaper strength-preserving methods and generalized proof/invariants. |
 
 ### Update protocol
 
