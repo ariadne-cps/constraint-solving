@@ -14,6 +14,7 @@
 #include "logging/logging.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -46,6 +47,7 @@ struct Selection {
     Bool verify_only=false;
     Bool compare_contained_skip=false;
     Bool compare_dependency_skip=false;
+    Bool profile_residual_shaving=false;
     std::string trace_prefix;
 };
 
@@ -91,6 +93,7 @@ void print_usage(char const* program) {
              <<"  --trace-prefix PREFIX      Replay exported paving d4/f3 boxes\n"
              <<"  --compare-contained-skip   Compare legacy full scan vs production\n"
              <<"  --compare-dependency-skip  Try static procedure-dependency shaving\n"
+             <<"  --profile-residual-shaving Profile P1 surviving box calls (0..8 evals)\n"
              <<"  --verify-only              Validate without timing\n"
              <<"  -h, --help                 Print this help\n";
 }
@@ -112,6 +115,10 @@ Bool parse_arguments(int argc,char const* argv[],Selection& selection) {
         }
         if(argument=="--compare-dependency-skip") {
             selection.compare_dependency_skip=true;
+            continue;
+        }
+        if(argument=="--profile-residual-shaving") {
+            selection.profile_residual_shaving=true;
             continue;
         }
         if(i+1>=argc) {
@@ -1076,6 +1083,315 @@ void compare_dependency_skip(Selection const& selection,
                 " separation results; no production code changed.\n";
 }
 
+// Instrument the *current production P1 schedule*, not the historical
+// full-scan loop. The 5-argument box_reduce overload runs exactly the
+// same contractor, but reports the number of validated interval-function
+// evaluations. Nothing in this profiler changes the production solver.
+struct ResidualShavingStatistics {
+    SizeType queries=0u;
+    SizeType separated=0u;
+    SizeType rounds=0u;
+    SizeType hull_calls=0u;
+    SizeType stopped_empty_hull=0u;
+    SizeType stopped_empty_box=0u;
+    SizeType stopped_threshold=0u;
+    SizeType guard_tests=0u;
+    SizeType guard_proofs=0u;
+    SizeType reused_proofs=0u;
+    SizeType unproved_outputs=0u;
+    SizeType unchanged_evaluations=0u;
+    SizeType changed_evaluations=0u;
+    double total_seconds=0.0;
+    double hull_seconds=0.0;
+    double guard_seconds=0.0;
+    double box_seconds=0.0;
+    BoxCallStatistics all;
+    std::vector<BoxCallStatistics> by_output;
+    std::vector<BoxCallStatistics> by_variable;
+    std::vector<BoxCallStatistics> by_pair;
+    std::array<SizeType,9u> histogram{};
+    std::array<SizeType,9u> unchanged_histogram{};
+
+    void prepare(SizeType outputs,SizeType variables) {
+        by_output.resize(outputs);
+        by_variable.resize(variables);
+        by_pair.resize(outputs*variables);
+    }
+
+    void record_box(SizeType i,SizeType j,SizeType variables,
+                    SizeType evaluations,Bool changed,Bool empty,
+                    double seconds) {
+        if(evaluations>=histogram.size())
+            throw std::runtime_error("box_reduce used more than eight slices");
+        all.add(evaluations,changed,empty,seconds);
+        by_output[i].add(evaluations,changed,empty,seconds);
+        by_variable[j].add(evaluations,changed,empty,seconds);
+        by_pair[i*variables+j].add(evaluations,changed,empty,seconds);
+        ++histogram[evaluations];
+        if(changed) {
+            changed_evaluations+=evaluations;
+        } else {
+            unchanged_evaluations+=evaluations;
+            ++unchanged_histogram[evaluations];
+        }
+    }
+
+    void validate() const {
+        if(queries!=stopped_empty_hull+stopped_empty_box+stopped_threshold
+           or queries!=separated+stopped_threshold
+           or all.changed+all.unchanged!=all.calls
+           or all.zero_evaluations!=histogram[0]
+           or all.evaluations!=changed_evaluations+unchanged_evaluations)
+            throw std::runtime_error("inconsistent residual summary");
+        SizeType histogram_calls=0u, histogram_evaluations=0u;
+        SizeType unchanged_histogram_calls=0u;
+        for(SizeType n=0u;n<histogram.size();++n) {
+            histogram_calls+=histogram[n];
+            histogram_evaluations+=n*histogram[n];
+            unchanged_histogram_calls+=unchanged_histogram[n];
+            if(unchanged_histogram[n]>histogram[n])
+                throw std::runtime_error("invalid unchanged residual histogram");
+        }
+        if(histogram_calls!=all.calls
+           or histogram_evaluations!=all.evaluations
+           or unchanged_histogram_calls!=all.unchanged)
+            throw std::runtime_error("invalid residual evaluation histogram");
+        for(auto const* group:{&by_output,&by_variable,&by_pair}) {
+            SizeType calls=0u,evals=0u,changed=0u,unchanged=0u;
+            SizeType emptied=0u,zero=0u;
+            for(auto const& r:*group) {
+                calls+=r.calls;
+                evals+=r.evaluations;
+                changed+=r.changed;
+                unchanged+=r.unchanged;
+                emptied+=r.emptied;
+                zero+=r.zero_evaluations;
+            }
+            if(calls!=all.calls or evals!=all.evaluations
+               or changed!=all.changed or unchanged!=all.unchanged
+               or emptied!=all.emptied or zero!=all.zero_evaluations)
+                throw std::runtime_error("invalid residual group statistics");
+        }
+    }
+};
+
+void traced_reduce_residual(
+        ConstraintSolver const& solver,UpperBoxType& domain,
+        ValidatedVectorMultivariateFunction const& function,
+        ExactBoxType const& codomain,ResidualShavingStatistics& stats) {
+    using Clock=std::chrono::steady_clock;
+    auto elapsed=[](Clock::time_point begin) {
+        return std::chrono::duration<double>(
+            Clock::now()-begin).count();
+    };
+    auto const begin=Clock::now();
+    ++stats.queries;
+    if(definitely(domain.is_empty())) {
+        ++stats.separated;
+        ++stats.stopped_empty_hull;
+        stats.total_seconds+=elapsed(begin);
+        return;
+    }
+
+    const ExactDouble MINIMUM_REDUCTION=0.75_x;
+    std::vector<Bool> certified_satisfied(codomain.size(),false);
+    FloatDPUpperBound magnitude={0u,dp};
+    for(SizeType j=0u;j<domain.size();++j)
+        magnitude+=domain[j].width();
+    FloatDPUpperBound previous=magnitude;
+
+    do {
+        ++stats.rounds;
+        ++stats.hull_calls;
+        auto const hstart=Clock::now();
+        solver.hull_reduce(domain,function,codomain);
+        stats.hull_seconds+=elapsed(hstart);
+        if(definitely(domain.is_empty())) {
+            ++stats.separated;
+            ++stats.stopped_empty_hull;
+            stats.total_seconds+=elapsed(begin);
+            return;
+        }
+
+        for(SizeType i=0u;i<codomain.size();++i) {
+            if(certified_satisfied[i]) {
+                ++stats.reused_proofs;
+                continue;
+            }
+            ++stats.guard_tests;
+            auto const gstart=Clock::now();
+            Bool const proved=definitely(subset(
+                Ariadne::apply(function[i],domain),codomain[i]));
+            stats.guard_seconds+=elapsed(gstart);
+            if(proved) {
+                certified_satisfied[i]=true;
+                ++stats.guard_proofs;
+                continue;
+            }
+
+            ++stats.unproved_outputs;
+            for(SizeType j=0u;j<domain.size();++j) {
+                UpperIntervalType const before=domain[j];
+                SizeType evaluations=0u;
+                auto const bstart=Clock::now();
+                solver.box_reduce(
+                    domain,function[i],codomain[i],j,evaluations);
+                double const seconds=elapsed(bstart);
+                stats.box_seconds+=seconds;
+                Bool const empty=definitely(domain.is_empty());
+                stats.record_box(i,j,domain.size(),evaluations,
+                                 not same(before,domain[j]),empty,seconds);
+                if(empty) {
+                    ++stats.separated;
+                    ++stats.stopped_empty_box;
+                    stats.total_seconds+=elapsed(begin);
+                    return;
+                }
+            }
+        }
+        previous=magnitude;
+        magnitude=0u;
+        for(SizeType j=0u;j<domain.size();++j)
+            magnitude+=domain[j].width();
+    } while(magnitude.raw()
+            < mul(near,previous.raw(),FloatDP(MINIMUM_REDUCTION,dp)));
+    ++stats.stopped_threshold;
+    stats.total_seconds+=elapsed(begin);
+}
+
+void profile_residual_shaving(Selection const& selection,
+                              std::string const& shape) {
+    SolverProblem problem=make_problem(shape);
+    auto records=read_adaptive_trace(selection.trace_prefix,shape);
+    ConstraintSolver solver;
+    ResidualShavingStatistics stats;
+    stats.prepare(problem.function.result_size(),problem.initial_domain.size());
+    for(SizeType q=0u;q<records.size();++q) {
+        auto const& record=records[q];
+        ExactBoxType codomain=problem.codomains.front();
+        for(SizeType j=0u;j<4u;++j) codomain[j]=record.box[j];
+
+        UpperBoxType production=problem.initial_domain;
+        solver.reduce(production,problem.function,codomain);
+        UpperBoxType traced=problem.initial_domain;
+        traced_reduce_residual(solver,traced,problem.function,codomain,stats);
+        if(not same(production,traced))
+            throw std::runtime_error(
+                "residual shaving instrumentation differs from production"
+                " shape="+shape+" query="+std::to_string(q));
+
+        UpperBoxType legacy=problem.initial_domain;
+        reduce_full_scan_reference(solver,legacy,problem.function,codomain);
+        if(not same(legacy,traced))
+            throw std::runtime_error(
+                "residual shaving differs from legacy full scan"
+                " shape="+shape+" query="+std::to_string(q));
+        if(definitely(traced.is_empty())!=record.separated)
+            throw std::runtime_error(
+                "residual shaving disagrees with paving separation trace"
+                " shape="+shape+" query="+std::to_string(q));
+    }
+    stats.validate();
+
+    std::cout<<"RESIDUAL_SHAVING_VERIFIED shape="<<shape
+             <<" d=4 f=3 queries="<<stats.queries
+             <<" separated="<<stats.separated
+             <<" rounds="<<stats.rounds
+             <<" hull_calls="<<stats.hull_calls
+             <<" guard_tests="<<stats.guard_tests
+             <<" guard_proofs="<<stats.guard_proofs
+             <<" reused_proofs="<<stats.reused_proofs
+             <<" unproved_outputs="<<stats.unproved_outputs
+             <<" box_calls="<<stats.all.calls
+             <<" box_evaluations="<<stats.all.evaluations
+             <<" box_changed="<<stats.all.changed
+             <<" box_unchanged="<<stats.all.unchanged
+             <<" box_empty="<<stats.all.emptied
+             <<"\n";
+    if(selection.verify_only) return;
+
+    std::cout<<"RESIDUAL_SHAVING_TIMES shape="<<shape
+             <<" instrumented_total_ms="<<std::fixed<<std::setprecision(4)
+                <<1000.0*stats.total_seconds
+             <<" hull_ms="<<1000.0*stats.hull_seconds
+             <<" guard_ms="<<1000.0*stats.guard_seconds
+             <<" box_ms="<<1000.0*stats.box_seconds
+             <<" other_ms="<<1000.0*(
+                stats.total_seconds-stats.hull_seconds
+                -stats.guard_seconds-stats.box_seconds)
+             <<" unchanged_box_evaluations="<<stats.unchanged_evaluations
+             <<" changed_box_evaluations="<<stats.changed_evaluations
+             <<"\n";
+
+    std::cout<<"RESIDUAL_SHAVING_EVAL_HIST shape="<<shape;
+    for(SizeType n=0u;n<stats.histogram.size();++n)
+        std::cout<<" eval_"<<n<<"="<<stats.histogram[n];
+    std::cout<<"\n";
+
+    std::cout<<"RESIDUAL_SHAVING_UNCHANGED_HIST shape="<<shape;
+    for(SizeType n=0u;n<stats.unchanged_histogram.size();++n)
+        std::cout<<" eval_"<<n<<"="<<stats.unchanged_histogram[n];
+    std::cout<<"\n";
+
+    auto print_group=[&](char const* name,SizeType index,
+                         BoxCallStatistics const& s) {
+        std::cout<<"RESIDUAL_SHAVING_GROUP shape="<<shape
+                 <<" group="<<name<<" index="<<index
+                 <<" calls="<<s.calls
+                 <<" evaluations="<<s.evaluations
+                 <<" changed="<<s.changed
+                 <<" unchanged="<<s.unchanged
+                 <<" empty="<<s.emptied
+                 <<" zero_evaluations="<<s.zero_evaluations
+                 <<" elapsed_ms="<<std::fixed<<std::setprecision(4)
+                    <<1000.0*s.seconds<<"\n";
+    };
+    for(SizeType i=0u;i<stats.by_output.size();++i) {
+        if(stats.by_output[i].calls!=0u)
+            print_group("output",i,stats.by_output[i]);
+    }
+    for(SizeType j=0u;j<stats.by_variable.size();++j)
+        print_group("variable",j,stats.by_variable[j]);
+
+    // Rank output/variable pairs by measured box-contractor time.
+    // This is an instrumented single replay, *not* a calibrated speedup.
+    std::vector<SizeType> ranking;
+    ranking.reserve(stats.by_pair.size());
+    for(SizeType pair=0u;pair<stats.by_pair.size();++pair) {
+        if(stats.by_pair[pair].calls!=0u) ranking.push_back(pair);
+    }
+    std::sort(ranking.begin(),ranking.end(),[&](SizeType a,SizeType b) {
+        if(stats.by_pair[a].seconds!=stats.by_pair[b].seconds)
+            return stats.by_pair[a].seconds>stats.by_pair[b].seconds;
+        return a<b;
+    });
+    SizeType const variables=problem.initial_domain.size();
+    SizeType const limit=std::min(ranking.size(),SizeType(12u));
+    for(SizeType rank=0u;rank<limit;++rank) {
+        SizeType const pair=ranking[rank];
+        auto const& s=stats.by_pair[pair];
+        std::cout<<"RESIDUAL_SHAVING_HOT_PAIR shape="<<shape
+                 <<" rank="<<(rank+1u)
+                 <<" output="<<(pair/variables)
+                 <<" variable="<<(pair%variables)
+                 <<" calls="<<s.calls
+                 <<" evaluations="<<s.evaluations
+                 <<" changed="<<s.changed
+                 <<" unchanged="<<s.unchanged
+                 <<" empty="<<s.emptied
+                 <<" zero_evaluations="<<s.zero_evaluations
+                 <<" elapsed_ms="<<std::fixed<<std::setprecision(4)
+                    <<1000.0*s.seconds
+                 <<"\n";
+    }
+    std::cout<<"RESIDUAL_SHAVING_NOTE: instrumented P1 replay only;"
+                " timings include profiling overhead. Histograms count"
+                " actual interval-function evaluations from box_reduce;"
+                " unchanged does not prove a call was dispensable."
+                " Full domain equality with production and the frozen"
+                " legacy reference was checked for every query.\n";
+}
+
 struct Datum {
     std::string shape;
     std::string operation;
@@ -1320,15 +1636,21 @@ int main(int argc,char const* argv[]) {
         Logger::instance().configuration().set_verbosity(1u);
         Selection selection;
         if(not parse_arguments(argc,argv,selection)) return 0;
-        if(selection.compare_contained_skip and selection.compare_dependency_skip)
+        unsigned const modes=
+            static_cast<unsigned>(selection.compare_contained_skip)
+            +static_cast<unsigned>(selection.compare_dependency_skip)
+            +static_cast<unsigned>(selection.profile_residual_shaving);
+        if(modes>1u)
             throw std::invalid_argument(
-                "--compare-contained-skip and --compare-dependency-skip are exclusive");
+                "comparison and profiling modes are mutually exclusive");
         if(not selection.trace_prefix.empty()) {
             for(std::string const& shape:selection.shapes) {
                 if(selection.compare_contained_skip) {
                     compare_contained_skip(selection,shape);
                 } else if(selection.compare_dependency_skip) {
                     compare_dependency_skip(selection,shape);
+                } else if(selection.profile_residual_shaving) {
+                    profile_residual_shaving(selection,shape);
                 } else {
                     profile_adaptive_trace(
                         selection.trace_prefix,shape,selection.verify_only);
@@ -1336,9 +1658,9 @@ int main(int argc,char const* argv[]) {
             }
             return 0;
         }
-        if(selection.compare_contained_skip or selection.compare_dependency_skip)
+        if(modes!=0u)
             throw std::invalid_argument(
-                "comparison mode requires --trace-prefix");
+                "comparison or profiling mode requires --trace-prefix");
         std::vector<Datum> results;
         for(std::string const& shape:selection.shapes) {
             std::cout<<"Measuring "<<shape

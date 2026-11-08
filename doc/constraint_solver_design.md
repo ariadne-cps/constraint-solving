@@ -258,6 +258,10 @@ The current benchmark can:
 - Compare the additional static dependency mask as a diagnostic
   against production and the frozen reference, including both
   prepared-mask and per-query rebuilt-mask timings.
+- Profile the *residual* calls after production P1 containment
+  (not the legacy full-scan counts), including a 0–8 evaluation
+  histogram, contraction status, time by output and coordinate,
+  and full equality checks against production and legacy.
 
 No official README or CI workflow is to be edited merely for
 experimental profiling. Keep benchmark construction opt-in and
@@ -456,11 +460,60 @@ benchmark and validate before adopting.
 
 ### P5 — Better shaving search and subdivision
 
-**Status:** next profiling priority after P2's negative
-realistic setup-cost result. Quantify the surviving nonlinear
-`box_reduce` calls and interval function evaluations before
-selecting a search algorithm; any changed contractor has a
-larger correctness and maintenance burden.
+**Status:** residual shaving profiler added to the benchmark on
+2026-11-08; compilation and operator results pending.
+No production contractor change. The goal is to measure actual
+post-P1 evaluations and contractor outcomes before selecting a
+search algorithm.
+
+The opt-in `--profile-residual-shaving` benchmark follows the
+**exact production P1 hull/containment/box schedule**. It uses
+the existing counting overload of `box_reduce`, instruments
+individual calls, and checks all final boxes against both
+production `reduce()` and the frozen pre-P1 full-scan reference,
+as well as exported paving separation bits. It reports:
+
+- `RESIDUAL_SHAVING_VERIFIED`: queries, rounds, P1 guard
+  proofs/reuse, surviving box calls/evaluations and changes;
+- `RESIDUAL_SHAVING_TIMES`: instrumented totals for hull,
+  guard, and box calls, and evaluations associated with changed
+  versus unchanged targeted intervals;
+- `RESIDUAL_SHAVING_EVAL_HIST` and
+  `RESIDUAL_SHAVING_UNCHANGED_HIST`: exact call counts with
+  **0–8** interval function evaluations, both for all calls
+  and for calls with no contracted coordinate;
+- `RESIDUAL_SHAVING_GROUP`: counts and timings by output
+  index or input coordinate; and
+- `RESIDUAL_SHAVING_HOT_PAIR`: twelve most expensive
+  output/coordinate pairs by measured box-contractor time.
+
+The current eight-slice algorithm searches from both boundaries
+and performs **at most eight** interval-function evaluations
+per nondegenerate call. A count of zero reflects an immediate
+return, usually for a degenerate target coordinate. Counting
+an unchanged box does not prove the call was redundant.
+The histogram distinguishes cheap early-stopping calls from
+expensive inconclusive scans. These are **instrumented single
+replay times**, not calibrated comparative speedups, and no
+mathematical feasibility claim follows from a nonempty box.
+
+From the `constraint-solving` directory, using the already
+exported traces:
+
+```sh
+cmake --build build-release --target benchmark_constraint_reduce
+./build-release/benchmarks/benchmark_constraint_reduce \
+  --trace-prefix "$HOME/Downloads/traces/outer" \
+  --profile-residual-shaving --verify-only --concurrency 0
+./build-release/benchmarks/benchmark_constraint_reduce \
+  --trace-prefix "$HOME/Downloads/traces/outer" \
+  --profile-residual-shaving --concurrency 0
+```
+
+Only after this breakdown should we choose between
+evaluation caching, different slice scheduling, validated
+monotonicity checks, or hierarchical interval subdivision.
+Each alternative must be shown sound and benchmarked separately.
 
 `box_reduce` currently scans up to eight lower slices and
 the remaining upper slices. Adaptive slice counts, reuse of
@@ -640,6 +693,8 @@ can be added for correctness-only replay.
 | 2026-11-08 | Added opt-in P2 static-dependency benchmark with certified procedure-index masks; verifies against production and frozen legacy full scan on adaptive traces, and measures both prepared-once and rebuild-per-query costs. | Diagnostic implementation committed; correctness and speed pending |
 
 | 2026-11-08 | P2 replay validated identical final domains and certified separations on 9,167 queries; only rotated-box skipped 10,756 more box calls. Geometric-mean speedups were 1.032x prepared and 0.883x rebuilt per query. | Reject general per-call dependency compilation; retain P2 diagnostic and profile residual nonlinear shaving next |
+
+| 2026-11-08 | Added opt-in P1-residual shaving profiler: 0–8 box evaluation histograms, unchanged-cost histogram, output/variable hot pairs and guard/hull/box timing. Verify every final box against production and frozen full scan. | Diagnostic implementation committed; correctness and measured results pending |
 
 ### Update protocol
 
