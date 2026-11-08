@@ -45,6 +45,7 @@ struct Selection {
     unsigned max_iterations=256u;
     Bool verify_only=false;
     Bool compare_contained_skip=false;
+    Bool compare_dependency_skip=false;
     std::string trace_prefix;
 };
 
@@ -88,7 +89,8 @@ void print_usage(char const* program) {
              <<"  --max-iterations N         Maximum calibrated repetitions\n"
              <<"  --concurrency 0            Sequential mode (only supported value)\n"
              <<"  --trace-prefix PREFIX      Replay exported paving d4/f3 boxes\n"
-             <<"  --compare-contained-skip   Test certified-satisfied constraints\n"
+             <<"  --compare-contained-skip   Compare legacy full scan vs production\n"
+             <<"  --compare-dependency-skip  Try static procedure-dependency shaving\n"
              <<"  --verify-only              Validate without timing\n"
              <<"  -h, --help                 Print this help\n";
 }
@@ -106,6 +108,10 @@ Bool parse_arguments(int argc,char const* argv[],Selection& selection) {
         }
         if(argument=="--compare-contained-skip") {
             selection.compare_contained_skip=true;
+            continue;
+        }
+        if(argument=="--compare-dependency-skip") {
+            selection.compare_dependency_skip=true;
             continue;
         }
         if(i+1>=argc) {
@@ -834,6 +840,242 @@ void compare_contained_skip(Selection const& selection,
                 " for every adaptive query. Production compared to frozen full scan.\n";
 }
 
+// Experimental P2: a Procedure makes the syntactic input-coordinate
+// dependency set explicit via IndexProcedureInstruction. This is a
+// conservative mask: unused coordinates are absent even when the
+// non-linear interval extension is inconclusive about containment.
+using DependencyMasks=std::vector<std::vector<unsigned char>>;
+
+DependencyMasks compile_dependency_masks(
+        ValidatedVectorMultivariateFunction const& function) {
+    DependencyMasks masks(
+        function.result_size(),
+        std::vector<unsigned char>(function.argument_size(),0u));
+    for(SizeType i=0u;i<function.result_size();++i) {
+        ValidatedProcedure procedure(function[i]);
+        for(auto const& instruction:procedure._instructions) {
+            auto const* index=std::get_if<IndexProcedureInstruction>(
+                &instruction.base());
+            if(index==nullptr) continue;
+            if(index->_ind>=function.argument_size())
+                throw std::runtime_error("invalid procedure dependency index");
+            masks[i][index->_ind]=1u;
+        }
+    }
+    return masks;
+}
+
+struct DependencySkipStatistics {
+    SizeType guard_tests=0u;
+    SizeType certified_outputs=0u;
+    SizeType reused_certificates=0u;
+    SizeType skipped_pairs=0u;
+    SizeType executed_box_calls=0u;
+    SizeType disjoint_fallback_outputs=0u;
+};
+
+void reduce_dependency_skip(
+        ConstraintSolver const& solver,UpperBoxType& domain,
+        ValidatedVectorMultivariateFunction const& function,
+        ExactBoxType const& codomain,DependencyMasks const& masks,
+        DependencySkipStatistics* stats=nullptr) {
+    const ExactDouble MINIMUM_REDUCTION=0.75_x;
+    if(masks.size()!=codomain.size())
+        throw std::invalid_argument("dependency output dimension mismatch");
+    for(auto const& mask:masks) {
+        if(mask.size()!=domain.size())
+            throw std::invalid_argument("dependency input dimension mismatch");
+    }
+    if(definitely(domain.is_empty())) return;
+
+    std::vector<Bool> certified_satisfied(codomain.size(),false);
+    FloatDPUpperBound magnitude={0u,dp};
+    for(SizeType j=0u;j<domain.size();++j)
+        magnitude+=domain[j].width();
+    FloatDPUpperBound previous=magnitude;
+    do {
+        solver.hull_reduce(domain,function,codomain);
+        if(definitely(domain.is_empty())) return;
+        for(SizeType i=0u;i<codomain.size();++i) {
+            if(certified_satisfied[i]) {
+                if(stats) ++stats->reused_certificates;
+                continue;
+            }
+
+            if(stats) ++stats->guard_tests;
+            UpperIntervalType image=Ariadne::apply(function[i],domain);
+            if(definitely(subset(image,codomain[i]))) {
+                certified_satisfied[i]=true;
+                if(stats) ++stats->certified_outputs;
+                continue;
+            }
+
+            // If direct interval evaluation already *proves* exclusion,
+            // retain the original complete sweep. Otherwise a contractor
+            // on an unused coordinate has no useful shaving effect.
+            // This conservative fallback avoids losing an emptiness
+            // detection when the hull and direct interval evaluations
+            // happen to have different pruning strength.
+            Bool const any_independent=
+                std::find(masks[i].begin(),masks[i].end(),0u)
+                !=masks[i].end();
+            Bool const disjoint_fallback=any_independent
+                and definitely(disjoint(image,codomain[i]));
+            if(disjoint_fallback and stats)
+                ++stats->disjoint_fallback_outputs;
+            for(SizeType j=0u;j<domain.size();++j) {
+                if(not disjoint_fallback and masks[i][j]==0u) {
+                    if(stats) ++stats->skipped_pairs;
+                    continue;
+                }
+                if(stats) ++stats->executed_box_calls;
+                solver.box_reduce(domain,function[i],codomain[i],j);
+                if(definitely(domain.is_empty())) return;
+            }
+        }
+        previous=magnitude;
+        magnitude=0u;
+        for(SizeType j=0u;j<domain.size();++j)
+            magnitude+=domain[j].width();
+    } while(magnitude.raw()
+            < mul(near,previous.raw(),FloatDP(MINIMUM_REDUCTION,dp)));
+}
+
+// Compare the production contained-skip reducer against an additional
+// dependency-aware candidate. Compiling the masks is measured both as
+// a one-time per-function setup and *inside* the per-query hot path;
+// the latter is the realistic cost of using this optimization directly
+// in the current reduce() API, which receives uncompiled functions.
+void compare_dependency_skip(Selection const& selection,
+                             std::string const& shape) {
+    SolverProblem problem=make_problem(shape);
+    std::vector<TraceRecord> const trace=
+        read_adaptive_trace(selection.trace_prefix,shape);
+    std::vector<ExactBoxType> targets;
+    targets.reserve(trace.size());
+    for(TraceRecord const& entry:trace) {
+        ExactBoxType codomain=problem.codomains.front();
+        for(SizeType j=0u;j<4u;++j) codomain[j]=entry.box[j];
+        targets.push_back(std::move(codomain));
+    }
+
+    ConstraintSolver solver;
+    DependencyMasks const prepared=compile_dependency_masks(problem.function);
+    SizeType total_edges=0u;
+    for(auto const& mask:prepared) {
+        for(unsigned char bit:mask)
+            total_edges+=static_cast<SizeType>(bit!=0u);
+    }
+    DependencySkipStatistics stats;
+    SizeType separated=0u;
+    for(SizeType q=0u;q<targets.size();++q) {
+        UpperBoxType baseline=problem.initial_domain;
+        solver.reduce(baseline,problem.function,targets[q]);
+        UpperBoxType candidate=problem.initial_domain;
+        reduce_dependency_skip(
+            solver,candidate,problem.function,targets[q],prepared,&stats);
+        if(not same(candidate,baseline)) {
+            throw std::runtime_error(
+                "dependency pruning changed production contracted domain"
+                " shape="+shape+" query="+std::to_string(q));
+        }
+        UpperBoxType legacy=problem.initial_domain;
+        reduce_full_scan_reference(solver,legacy,problem.function,targets[q]);
+        if(not same(legacy,baseline)) {
+            throw std::runtime_error(
+                "production differs from legacy full-scan oracle"
+                " shape="+shape+" query="+std::to_string(q));
+        }
+        Bool const empty=definitely(baseline.is_empty());
+        if(empty!=trace[q].separated) {
+            throw std::runtime_error(
+                "replayed separation does not match exported paving trace"
+                " shape="+shape+" query="+std::to_string(q));
+        }
+        separated+=static_cast<SizeType>(empty);
+    }
+    std::cout<<"DEPENDENCY_SKIP_VERIFIED shape="<<shape
+             <<" d=4 f=3 queries="<<targets.size()
+             <<" separated="<<separated
+             <<" edges="<<total_edges
+             <<" possible_edges="<<(prepared.size()*problem.initial_domain.size())
+             <<" guard_tests="<<stats.guard_tests
+             <<" guard_proofs="<<stats.certified_outputs
+             <<" reused_proofs="<<stats.reused_certificates
+             <<" dependency_skipped="<<stats.skipped_pairs
+             <<" executed_box_calls="<<stats.executed_box_calls
+             <<" disjoint_fallbacks="<<stats.disjoint_fallback_outputs
+             <<"\n";
+    if(selection.verify_only) return;
+
+    auto original=[&]() {
+        SizeType checksum=0u;
+        for(ExactBoxType const& codomain:targets) {
+            UpperBoxType domain=problem.initial_domain;
+            solver.reduce(domain,problem.function,codomain);
+            checksum+=static_cast<SizeType>(definitely(domain.is_empty()));
+            keep_alive(domain);
+        }
+        return checksum;
+    };
+    auto prepared_work=[&]() {
+        SizeType checksum=0u;
+        for(ExactBoxType const& codomain:targets) {
+            UpperBoxType domain=problem.initial_domain;
+            reduce_dependency_skip(
+                solver,domain,problem.function,codomain,prepared);
+            checksum+=static_cast<SizeType>(definitely(domain.is_empty()));
+            keep_alive(domain);
+        }
+        return checksum;
+    };
+    auto rebuilt_work=[&]() {
+        SizeType checksum=0u;
+        for(ExactBoxType const& codomain:targets) {
+            DependencyMasks masks=compile_dependency_masks(problem.function);
+            UpperBoxType domain=problem.initial_domain;
+            reduce_dependency_skip(
+                solver,domain,problem.function,codomain,masks);
+            checksum+=static_cast<SizeType>(definitely(domain.is_empty()));
+            keep_alive(domain);
+        }
+        return checksum;
+    };
+
+    if(original()!=separated or prepared_work()!=separated
+       or rebuilt_work()!=separated) {
+        throw std::runtime_error(
+            "dependency pruning sweep checksum mismatch for "+shape);
+    }
+    Timing production=median_ms(original,selection);
+    Timing prepared_time=median_ms(prepared_work,selection);
+    Timing rebuilt_time=median_ms(rebuilt_work,selection);
+    double prepared_ratio=production.milliseconds/prepared_time.milliseconds;
+    double rebuilt_ratio=production.milliseconds/rebuilt_time.milliseconds;
+    if(not std::isfinite(prepared_ratio) or not std::isfinite(rebuilt_ratio)
+       or prepared_ratio<=0.0 or rebuilt_ratio<=0.0)
+        throw std::runtime_error("invalid dependency pruning speed ratio");
+
+    std::cout<<"DEPENDENCY_SKIP_COMPARE shape="<<shape
+             <<" d=4 f=3 queries="<<targets.size()
+             <<" production_median_ms="<<std::fixed<<std::setprecision(5)
+                <<production.milliseconds
+             <<" prepared_median_ms="<<prepared_time.milliseconds
+             <<" rebuilt_median_ms="<<rebuilt_time.milliseconds
+             <<" prepared_speedup="<<std::setprecision(3)<<prepared_ratio
+             <<" rebuilt_speedup="<<rebuilt_ratio
+             <<" production_iters="<<production.iterations
+             <<" prepared_iters="<<prepared_time.iterations
+             <<" rebuilt_iters="<<rebuilt_time.iterations
+             <<" samples="<<selection.samples
+             <<"\n";
+    std::cout<<"DEPENDENCY_SKIP_COMPARE: production is the certified-"
+                "containment reducer; prepared excludes dependency compilation"
+                " from the timed sweep, rebuilt includes it for every query."
+                " All three produce identical contracted domains and"
+                " separation results; no production code changed.\n";
+}
+
 struct Datum {
     std::string shape;
     std::string operation;
@@ -1078,10 +1320,15 @@ int main(int argc,char const* argv[]) {
         Logger::instance().configuration().set_verbosity(1u);
         Selection selection;
         if(not parse_arguments(argc,argv,selection)) return 0;
+        if(selection.compare_contained_skip and selection.compare_dependency_skip)
+            throw std::invalid_argument(
+                "--compare-contained-skip and --compare-dependency-skip are exclusive");
         if(not selection.trace_prefix.empty()) {
             for(std::string const& shape:selection.shapes) {
                 if(selection.compare_contained_skip) {
                     compare_contained_skip(selection,shape);
+                } else if(selection.compare_dependency_skip) {
+                    compare_dependency_skip(selection,shape);
                 } else {
                     profile_adaptive_trace(
                         selection.trace_prefix,shape,selection.verify_only);
@@ -1089,9 +1336,9 @@ int main(int argc,char const* argv[]) {
             }
             return 0;
         }
-        if(selection.compare_contained_skip)
+        if(selection.compare_contained_skip or selection.compare_dependency_skip)
             throw std::invalid_argument(
-                "--compare-contained-skip requires --trace-prefix");
+                "comparison mode requires --trace-prefix");
         std::vector<Datum> results;
         for(std::string const& shape:selection.shapes) {
             std::cout<<"Measuring "<<shape

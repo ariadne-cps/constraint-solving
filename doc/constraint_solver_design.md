@@ -253,8 +253,11 @@ The current benchmark can:
 - Verify the replayed final upper box against unmodified
   `ConstraintSolver::reduce()` and the certified separation bit
   from paving.
-- Compare an experimental certified-containment scheduling variant
-  against the original on the *same adaptive* inputs.
+- Compare production certified containment against an independent
+  frozen full-scan reference on the *same adaptive* inputs.
+- Compare the additional static dependency mask as a diagnostic
+  against production and the frozen reference, including both
+  prepared-mask and per-query rebuilt-mask timings.
 
 No official README or CI workflow is to be edited merely for
 experimental profiling. Keep benchmark construction opt-in and
@@ -264,8 +267,8 @@ separately requested.
 ## 4. Optimization options, decisions, and status
 
 Priority is based on the *measured bottleneck* and proof burden,
-not on expected headline speedups. None of the following is yet
-an accepted production-`reduce()` optimization.
+not on expected headline speedups. P1 has been promoted to
+production; the remaining items are experimental or proposed.
 
 ### P1 — Certified containment pruning (promoted to production)
 
@@ -317,8 +320,12 @@ remains meaningful after the promotion.
 
 ### P2 — Static variable dependencies
 
-**Status:** proposed; related machinery already implemented
-in `propagate()`, not yet transferred to `reduce()`.
+**Status:** diagnostic prototype implemented in
+`benchmarks/benchmark_constraint_reduce.cpp` using
+`--compare-dependency-skip`. No production change; local
+compile, correctness replay, and timing are pending. The
+`propagate()` implementation already uses related procedure
+dependency extraction.
 
 A contractor for `f_i` with respect to coordinate `j`
 cannot shave based on changing `j` if `f_i` provably does
@@ -331,8 +338,47 @@ it reads cached procedure instructions. Never use the
 absence of observed contractions in a trace as a proof of
 independence.
 
-First test the dependency filter alone against the original
-contractor order; only then compose it with P1.
+P1 is already in production, so the new isolated experiment
+compares **the current production contained-skip reducer** against
+a candidate that additionally avoids contractor pairs where the
+validated procedure has no `IndexProcedureInstruction` referring to
+that input coordinate. A variable is never ruled out on the basis
+of observed ineffectiveness or approximate gradients.
+
+The diagnostic constructs a conservative dependency mask from each
+`ValidatedProcedure(function[i])`, then checks exact final-box
+identity on every query against both current production and the
+frozen old full-scan reference. It retains the original contractor
+order and 0.75 round threshold. If the direct interval image is
+certifiably disjoint from the codomain, it conservatively retains
+the complete contractor sweep for that output, rather than losing
+any immediate empty-domain proof in a coordinate with no dependency.
+
+**Two timing scenarios are mandatory:** `prepared` builds masks
+once for the collection of repeated queries with the same functions
+(outside the timed loop); `rebuilt` includes new procedure
+compilation for **every query**, modeling adoption through the
+current uncompiled `reduce()` interface. The latter can lose all
+nominal contractor savings to setup cost; do not extrapolate the
+prepared result to production without a supported prepared-function
+API and a lifecycle/thread-safety analysis.
+
+Run from `constraint-solving` with existing d4/f3 traces:
+
+```sh
+cmake --build build-release --target benchmark_constraint_reduce
+./build-release/benchmarks/benchmark_constraint_reduce \
+  --trace-prefix "$HOME/ariadne-benchmark-traces/outer" \
+  --compare-dependency-skip --verify-only --concurrency 0
+./build-release/benchmarks/benchmark_constraint_reduce \
+  --trace-prefix "$HOME/ariadne-benchmark-traces/outer" \
+  --compare-dependency-skip --concurrency 0
+```
+
+Do not interpret a zero or small `dependency_skipped` count as a
+bug: the remaining nonlinear outputs may use all input coordinates.
+Promote no P2 production changes until the measured speedup including
+realistic preparation cost is positive on independent workloads.
 
 ### P3 — Incremental worklist / wake-up scheduling
 
@@ -545,6 +591,8 @@ can be added for correctness-only replay.
 | 2026-11-08 | Fixed test-only `apply` lookup ambiguity with libc++ `std::apply` by qualifying `Ariadne::apply`; benchmark and production algorithm unchanged. | Correction committed; test rerun pending |
 
 | 2026-11-08 | After green local test run, promote validated containment caching into vector `ConstraintSolver::reduce()`. Keep the frozen old full-scan only in benchmark as an independent speed/equivalence baseline; unit tests exercise production behavior and invariants directly, with no experimental loop copy. | Production change committed; cross-platform CI and post-promotion trace comparison pending |
+
+| 2026-11-08 | Added opt-in P2 static-dependency benchmark with certified procedure-index masks; verifies against production and frozen legacy full scan on adaptive traces, and measures both prepared-once and rebuild-per-query costs. | Diagnostic implementation committed; correctness and speed pending |
 
 ### Update protocol
 
