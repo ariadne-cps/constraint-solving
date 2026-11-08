@@ -62,19 +62,7 @@ setup_standalone_project_tests(
         "${PROJECT_SOURCE_DIR}/src"
 )
 
-# Reuse the benchmarks aggregator provided by dependencies, as in paving.
-# The diagnostic executable is opt-in and excluded from the library/test build.
-if(NOT TARGET benchmarks)
-    add_custom_target(benchmarks)
-endif()
-
-add_executable(benchmark_constraint_reduce
-    benchmarks/benchmark_constraint_reduce.cpp)
-target_link_libraries(benchmark_constraint_reduce
-    PRIVATE ariadne-constraint-solving constraint_solving logging)
-set_target_properties(benchmark_constraint_reduce PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/benchmarks")
-add_dependencies(benchmarks benchmark_constraint_reduce)
+# Benchmarks are registered by setup_standalone_project_tests().
 
 if(BUILD_PYTHON_BINDINGS)
     add_subdirectory(python)
