@@ -1439,10 +1439,12 @@ preserve the original measurements.
 
 ### P6 — Reuse compiled vector hull procedures (benchmark only)
 
-**Status (2026-11-08):** implementation in the existing standalone C++
-benchmark; exact-box verification and operator timings on the five
-d4/f3 paving traces are **pending**. No changes to the production
-solver or its public API.
+**Status (2026-11-08):** operator build and correctness-only replay
+**passed** for all five d4/f3 paving shapes: 9,167 queries; P1,
+per-query precompiled hull and per-workload prepared hull returned
+representation-exactly identical boxes, matching the frozen full
+scan and exported paving separation bits. Timed measurements are
+**still pending**. No changes to the production solver or its API.
 
 The current production P1 `ConstraintSolver::reduce()`
 calls vector `hull_reduce()` in each contraction round;
@@ -1502,6 +1504,41 @@ cmake --build build-release --target benchmark_constraint_reduce
   --samples 7 --min-sample-ms 12 --concurrency 0
 ```
 
+
+#### P6 correctness replay — operator results (2026-11-08)
+
+After the specialized-vector API fixes, the operator successfully
+built and ran the **correctness-only** C++ replay with
+`--trace-prefix "$HOME/Downloads/traces/outer"
+--compare-precompiled-hull --verify-only --concurrency 0`.
+
+| Shape | Queries | P1 empty | Hull rounds | Guard tests | Reused certificates | Box calls |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| aligned-box | 2,927 | 600 | 5,254 | 27,924 | 27,924 | 0 |
+| rotated-box | 2,591 | 576 | 4,733 | 28,266 | 22,644 | 21,670 |
+| aligned-ellipsoid | 1,127 | 372 | 4,679 | 9,082 | 14,208 | 17,617 |
+| rotated-ellipsoid | 1,055 | 296 | 5,841 | 9,913 | 19,112 | 22,534 |
+| ball | 1,467 | 414 | 5,795 | 11,521 | 17,344 | 21,720 |
+| **Total** | **9,167** | **2,258** | **26,302** | **86,706** | **101,232** | **83,541** |
+
+Every shape reported `matched_p1=true matched_legacy=true
+matched_trace=true`, verifying both precompiled variants with
+**zero final-box differences** against P1 across the recorded traces
+and **zero separation-bit differences** against the paving exports.
+The 26,302 hull rounds exceed the 9,167 query count, making
+cross-round procedure reuse potentially relevant, but these
+counts do **not** measure constructor overhead or runtime savings.
+Certificate reuse and call counts are instrumentation for the
+prepared P1 schedule, not an independent proof of speedup.
+The operator's output expressly reported `Correctness-only replay;
+timing not collected`. Next run the identical five-shape benchmark
+without `--verify-only` and compare per-query, warmed-prepared
+and amortized-prepared timings against P1.
+
+**Boundary:** exact equality is established only on these concrete
+replayed boxes; it does not by itself prove equivalence on arbitrary
+functions, precision settings or inputs.
+
 **Compiler diagnosis and correction (2026-11-08):** two attempted
 P6 constructions failed under AppleClang. The original direct
 `Vector<ValidatedProcedure>(function)` construction bound to the
@@ -1518,8 +1555,7 @@ includes `function/procedure.hpp` **before**
 `constraint_solver.hpp` and directly constructs
 `Vector<ValidatedProcedure>(function)` to use that specialization.
 This retains the intended *vector* hull contractor and avoids
-per-output scalar hull replacement. **Compilation and replay of
-this corrected revision are not yet verified.**
+per-output scalar hull replacement. **The later P6 build and correctness-only replay passed; timed performance remains pending.**
 
 **Third compile correction (2026-11-08):** once the specialized
 vector constructor compiled, AppleClang identified an unrelated
@@ -1529,8 +1565,7 @@ method-call error in P6's isolated constructor timing: the
 `local.result_size()` from that timing lambda. All member
 calls on `local`, `prepared` and `hull_procedure` inside P6
 were checked against the actual specialization declaration:
-this was the only invalid member call. A complete operator
-build and replay of the corrected revision remain pending.
+this was the only invalid member call. The subsequent operator build and correctness-only replay completed successfully on all five shapes; runtime measurements remain pending.
 
 **Design decision:** even if procedure preparation proves faster,
 cross-query reuse would require an explicitly prepared function
@@ -1549,6 +1584,8 @@ on the fixed replay traces.
 | 2026-11-08 | Fixed a second P6 AppleClang failure: generic `Vector(n,generator)` instantiates `UniformArray<ValidatedProcedure>` which lacks characteristics. The actual vector procedure is a specialized `Vector<Procedure<Y>>` declared in `function/procedure.hpp`; reordered benchmark includes to match production and restored its direct constructor from the vector-valued function. | New build and five-shape equivalence replay still pending; no solver changes. |
 
 | 2026-11-08 | Fixed P6's third AppleClang compile failure: a `Vector<ValidatedProcedure>` constructor-timing lambda called nonexistent `local.size()`. The specialized vector has `result_size()`, so it now returns `local.result_size()`. Audited all `local`/`prepared`/`hull_procedure` member calls in P6 against the specialized class declaration; no other invalid calls identified. | Complete build and five-shape verification/timing pending; production unchanged. |
+
+| 2026-11-08 | Operator completed C++ P6 correctness-only replay on all five d4/f3 paving shapes, 9,167 queries using `$HOME/Downloads/traces/outer`: P1 and both procedure-reuse variants matched exactly for every final box, frozen full-scan output and exported separation bit. Totals: 2,258 empty, 26,302 hull rounds, 83,541 box calls. All five `PRECOMPILED_HULL_VERIFIED` rows reported `matched_p1=true matched_legacy=true matched_trace=true`. | Compiler issues closed; no timing results yet. Run seven-sample whole-trace timings including separate prepared-construction cost before considering production changes. |
 
 ### Update protocol
 
