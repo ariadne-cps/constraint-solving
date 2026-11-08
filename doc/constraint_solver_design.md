@@ -878,6 +878,58 @@ measurements. The 12 incomparable resolution boxes and
 36 unseparated-but-truly-empty boxes remain useful diagnostic
 targets; results do not justify promotion to production.
 
+#### Exact audit of incomparable resolution contractions (diagnostic)
+
+The optional `--audit-resolution-incomparables` switch extends
+`--compare-adaptive-shaving` for **rotated-ellipsoid only**.
+For each box where depth-8/cap-64 resolution and P1 production
+contract to incomparable domains, the diagnostic prints the two sets
+of binary-exact interval endpoints as hexadecimal floating-point
+numbers and counts which faces each method tightens.
+
+For **each contractor independently**, the audit covers all eight
+possible outside half-slabs (one per bound on each coordinate) of
+the contracted box inside the original trace query and `[0,1]^4`.
+It uses the same exact Ariadne `Rational` quadratic minimization
+as the earlier 28-case emptiness audit, now on each excluded slab.
+Every feasible point not retained by a contractor must be strictly
+outside at least one retained face. An excluded slab with exact
+minimum `Q>25` is certified safe; when the minimum is
+exactly 25 at the retained face, the strict outside region is
+also safe (positive-definite Q has a unique minimizer).
+When `Q<25`, a rational witness strictly outside the retained
+box is produced by exact convex interpolation if necessary.
+A minimum equal to 25 attained *strictly outside* is itself an
+exact feasible counterexample.
+
+The diagnostic distinguishes `geometry=EXACTLY_EMPTY`
+(vacuously sound) from `geometry=FEASIBLE`, and reports
+`production=SOUND` / `candidate=SOUND` or
+`LOST_FEASIBLE_POINT` separately. It checks every cut
+face rather than sampling one witness, prints
+`AUDIT_INCOMPARABLE_FACE`, `AUDIT_INCOMPARABLE_QUERY`,
+`AUDIT_INCOMPARABLE_COUNTEREXAMPLE` (only if needed) and
+`AUDIT_INCOMPARABLE_SUMMARY`, and exits unsuccessfully
+on any lost feasible point. The audit runs before timing, and
+does not alter production or candidate contraction semantics.
+
+```sh
+git pull --ff-only
+cmake --build build-release --target benchmark_constraint_reduce
+./build-release/benchmarks/benchmark_constraint_reduce \
+  --audit-ellipsoid-self-test
+./build-release/benchmarks/benchmark_constraint_reduce \
+  --trace-prefix "$HOME/Downloads/traces/outer" \
+  --shapes rotated-ellipsoid \
+  --compare-adaptive-shaving \
+  --audit-resolution-incomparables \
+  --verify-only --concurrency 0
+```
+
+**Validation status:** source added; complete build and operator replay
+on the 12 known incomparable resolution query boxes remain pending.
+Do not infer their soundness from the earlier 28-case emptiness audit.
+
 **Decision:** retain the memoization diagnostic for reuse
 studies but do not insert it into production. The specific
 28 additional empty results have passed independent exact
@@ -1092,6 +1144,8 @@ can be added for correctness-only replay.
 | 2026-11-08 | Moved the independent rotated-ellipsoid oracle into `benchmark_constraint_reduce.cpp`, using exact rational arithmetic on original binary-double trace endpoints; both adaptive modes and all baseline separation bits are audited before timing. Removed the Python script and added a C++ seven-case self-test mode. | Full Ariadne build and replay on operator traces remain pending |
 
 | 2026-11-08 | Operator C++ exact-audit replay at `--trace-prefix "$HOME/Downloads/traces/outer"` verified rotated-ellipsoid d4/f3 (1,055 queries): 360 actually empty, production 296 sound separations, resolution 324 sound separations including 28/28 additional exact proofs (12 with Q=100, 16 with Q=2500/13), zero false positives; budget-8 296. Resolution contractions: 425 same, 618 stronger, 0 weaker, 12 incomparable; budget-8: 671 same, 24 stronger, 324 weaker, 36 incomparable. | Close the 28-case audit gap for this trace only; retain adaptive prototypes in benchmarks, no production promotion, analyze incomparable boxes and general soundness separately. |
+
+| 2026-11-08 | Added opt-in exact rational feasibility audit for the depth-8/cap-64 resolution candidate’s incomparable rotated-ellipsoid contractions. Checks every open excluded face for both P1 production and candidate, distinguishing vacuous empty geometry, sound but incomparable contractions, and constructive feasible-point loss (including exact threshold boundary handling). Added self-tests for tangent and strict-cut cases. | C++ build and replay of the 12 known incomparable cases pending; no production changes. |
 
 ### Update protocol
 

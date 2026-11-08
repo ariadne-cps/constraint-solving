@@ -52,6 +52,7 @@ struct Selection {
     Bool compare_adaptive_shaving=false;
     Bool compare_adaptive_cache=false;
     Bool audit_ellipsoid_self_test=false;
+    Bool audit_resolution_incomparables=false;
     unsigned adaptive_depth=8u;
     unsigned adaptive_budget=8u;
     unsigned adaptive_resolution_budget=64u;
@@ -104,6 +105,7 @@ void print_usage(char const* program) {
              <<"  --compare-adaptive-shaving Compare 8-slice vs adaptive shaving\n"
              <<"  --compare-adaptive-cache   Benchmark reuse of tested dyadic cells\n"
              <<"  --audit-ellipsoid-self-test Test exact rational geometry oracle\n"
+             <<"  --audit-resolution-incomparables Exact audit of rotated-ellipsoid resolution tradeoffs\n"
              <<"  --adaptive-depth N         Maximum dyadic depth (1..12; default 8)\n"
              <<"  --adaptive-budget N        Tight evaluation budget (>=2; default 8)\n"
              <<"  --adaptive-resolution-budget N Evaluation cap for depth-limited mode (default 64)\n"
@@ -144,6 +146,10 @@ Bool parse_arguments(int argc,char const* argv[],Selection& selection) {
         }
         if(argument=="--audit-ellipsoid-self-test") {
             selection.audit_ellipsoid_self_test=true;
+            continue;
+        }
+        if(argument=="--audit-resolution-incomparables") {
+            selection.audit_resolution_incomparables=true;
             continue;
         }
         if(i+1>=argc) {
@@ -446,6 +452,196 @@ std::string exact_witness_string(std::array<ExactRational,4u> const& point) {
     return out.str();
 }
 
+// This is a complete shape-specific containment check for the feasible set.
+// A feasible point outside a retained axis-aligned box belongs to one of
+// its eight *open* exterior half-slabs. Exact minimization on the closed
+// slab is sufficient only if its minimizer lies strictly outside, or
+// if Qmin<25 and the open slab has positive extent. A minimizer on the
+// retained boundary with Qmin==25 is NOT a counterexample.
+ExactRational rotated_ellipsoid_point_q(
+        std::array<ExactRational,4u> const& point) {
+    ExactRational const half=ExactRational(1)/2;
+    return rotated_ellipsoid_q(
+        point[0]-half,point[1]-half,point[2]-half,point[3]-half);
+}
+
+struct ExactContractionAudit {
+    SizeType cut_faces=0u;
+    SizeType lost_faces=0u;
+    std::size_t witness_coordinate=0u;
+    bool witness_below=false;
+    ExactRational witness_q=0;
+    std::array<ExactRational,4u> witness{};
+};
+
+ExactContractionAudit audit_exact_ellipsoid_contraction(
+        BinaryBox const& query,BinaryBox const& retained) {
+    ExactContractionAudit result;
+    ExactRational const zero=0;
+    ExactRational const one=1;
+    std::array<std::pair<ExactRational,ExactRational>,4u> domain;
+    for(std::size_t j=0u;j<4u;++j) {
+        if(not std::isfinite(retained[j].first)
+           or not std::isfinite(retained[j].second)
+           or retained[j].first>retained[j].second)
+            throw std::runtime_error(
+                "exact contraction audit requires a nonempty finite box");
+        domain[j]={
+            std::max(zero,binary_double_as_rational(query[j].first)),
+            std::min(one,binary_double_as_rational(query[j].second))};
+        if(domain[j].first>domain[j].second) return result;
+    }
+
+    auto check_side=[&](std::size_t coordinate,bool below,double bound) {
+        BinaryBox slab=query;
+        if(below) slab[coordinate].second=std::min(
+            slab[coordinate].second,bound);
+        else slab[coordinate].first=std::max(
+            slab[coordinate].first,bound);
+        ++result.cut_faces;
+        ExactEllipsoidMinimum minimum=exact_rotated_ellipsoid_minimum(slab);
+        if(minimum.empty()) return;
+
+        ExactRational const cut=binary_double_as_rational(bound);
+        auto point=minimum.witness;
+        auto strictly_outside=[&](ExactRational const& x) {
+            return below ? x<cut : x>cut;
+        };
+        if(not strictly_outside(point[coordinate])) {
+            if(minimum.minimum==25) return;
+            // Since Qmin<25, convexity provides an explicit rational
+            // feasible witness on the open side. Mix with the far side
+            // of the queried domain and use the convex upper bound:
+            // Q((1-t)*minimizer+t*other) <= (1-t)*Qmin+t*Qother.
+            auto other=point;
+            other[coordinate]=below
+                ? domain[coordinate].first : domain[coordinate].second;
+            if(not strictly_outside(other[coordinate]))
+                throw std::runtime_error("zero-width excluded open slab");
+            ExactRational const q_other=rotated_ellipsoid_point_q(other);
+            ExactRational const t=q_other<=25 ? ExactRational(1)
+                : (ExactRational(25)-minimum.minimum)
+                  /(2*(q_other-minimum.minimum));
+            point[coordinate]+=
+                t*(other[coordinate]-point[coordinate]);
+        }
+        if(not strictly_outside(point[coordinate])
+           or rotated_ellipsoid_point_q(point)>25)
+            throw std::runtime_error(
+                "invalid constructed rational exclusion counterexample");
+        for(std::size_t j=0u;j<4u;++j)
+            if(point[j]<domain[j].first or point[j]>domain[j].second)
+                throw std::runtime_error(
+                    "exclusion counterexample outside query domain");
+        ++result.lost_faces;
+        if(result.lost_faces==1u) {
+            result.witness_coordinate=coordinate;
+            result.witness_below=below;
+            result.witness_q=rotated_ellipsoid_point_q(point);
+            result.witness=std::move(point);
+        }
+    };
+
+    for(std::size_t j=0u;j<4u;++j) {
+        ExactRational const lower=
+            binary_double_as_rational(retained[j].first);
+        ExactRational const upper=
+            binary_double_as_rational(retained[j].second);
+        if(domain[j].first<lower)
+            check_side(j,true,retained[j].first);
+        if(domain[j].second>upper)
+            check_side(j,false,retained[j].second);
+    }
+    return result;
+}
+
+BinaryBox exact_audit_box_endpoints(UpperBoxType const& domain) {
+    BinaryBox result{};
+    for(std::size_t j=0u;j<4u;++j)
+        result[j]={domain[j].lower_bound().get_d(),
+                   domain[j].upper_bound().get_d()};
+    return result;
+}
+
+struct IncomparableAuditStatistics {
+    SizeType cases=0u;
+    SizeType empty_geometry=0u;
+    SizeType feasible_geometry=0u;
+    SizeType both_sound=0u;
+    SizeType production_loss_cases=0u;
+    SizeType candidate_loss_cases=0u;
+    SizeType cut_faces_checked=0u;
+};
+
+void audit_resolution_incomparable_case(
+        SizeType query_index,TraceRecord const& trace,
+        ExactEllipsoidMinimum const& geometry,
+        UpperBoxType const& production,UpperBoxType const& candidate,
+        IncomparableAuditStatistics& stats) {
+    ++stats.cases;
+    BinaryBox const p=exact_audit_box_endpoints(production);
+    BinaryBox const c=exact_audit_box_endpoints(candidate);
+    SizeType candidate_tighter=0u;
+    SizeType production_tighter=0u;
+    for(std::size_t j=0u;j<4u;++j) {
+        candidate_tighter+=static_cast<SizeType>(c[j].first>p[j].first);
+        candidate_tighter+=static_cast<SizeType>(c[j].second<p[j].second);
+        production_tighter+=static_cast<SizeType>(p[j].first>c[j].first);
+        production_tighter+=static_cast<SizeType>(p[j].second<c[j].second);
+        if(p[j]!=c[j]) {
+            std::ostringstream line;
+            line<<std::hexfloat
+                <<"AUDIT_INCOMPARABLE_FACE method=resolution query="<<query_index
+                <<" coordinate="<<j
+                <<" production=["<<p[j].first<<","<<p[j].second<<"]"
+                <<" candidate=["<<c[j].first<<","<<c[j].second<<"]";
+            std::cout<<line.str()<<"\n";
+        }
+    }
+
+    std::cout<<"AUDIT_INCOMPARABLE_QUERY method=resolution query="<<query_index
+             <<" candidate_tighter_faces="<<candidate_tighter
+             <<" production_tighter_faces="<<production_tighter;
+    if(geometry.empty()) {
+        ++stats.empty_geometry;
+        std::cout<<" geometry=EXACTLY_EMPTY"
+                    " production=VACUOUS candidate=VACUOUS\n";
+        return;
+    }
+
+    ++stats.feasible_geometry;
+    ExactContractionAudit const pa=
+        audit_exact_ellipsoid_contraction(trace.endpoints,p);
+    ExactContractionAudit const ca=
+        audit_exact_ellipsoid_contraction(trace.endpoints,c);
+    stats.cut_faces_checked+=pa.cut_faces+ca.cut_faces;
+    bool const production_ok=pa.lost_faces==0u;
+    bool const candidate_ok=ca.lost_faces==0u;
+    stats.production_loss_cases+=static_cast<SizeType>(not production_ok);
+    stats.candidate_loss_cases+=static_cast<SizeType>(not candidate_ok);
+    stats.both_sound+=static_cast<SizeType>(production_ok and candidate_ok);
+    std::cout<<" geometry=FEASIBLE"
+             <<" production="<<(production_ok?"SOUND":"LOST_FEASIBLE_POINT")
+             <<" candidate="<<(candidate_ok?"SOUND":"LOST_FEASIBLE_POINT")
+             <<" production_cut_faces="<<pa.cut_faces
+             <<" candidate_cut_faces="<<ca.cut_faces
+             <<" production_lost_faces="<<pa.lost_faces
+             <<" candidate_lost_faces="<<ca.lost_faces<<"\n";
+    auto print_loss=[&](char const* contractor,ExactContractionAudit const& a) {
+        if(a.lost_faces==0u) return;
+        std::cout<<"AUDIT_INCOMPARABLE_COUNTEREXAMPLE method=resolution"
+                 <<" query="<<query_index
+                 <<" contractor="<<contractor
+                 <<" coordinate="<<a.witness_coordinate
+                 <<" side="<<(a.witness_below?"below":"above")
+                 <<" min_feasible_Q="<<a.witness_q
+                 <<" feasible_point="<<exact_witness_string(a.witness)
+                 <<"\n";
+    };
+    print_loss("production",pa);
+    print_loss("candidate",ca);
+}
+
 void audit_rotated_ellipsoid_self_test() {
     auto point=[](double value) {return std::make_pair(value,value);};
     BinaryBox full{{{0,1},{0,1},{0,1},{0,1}}};
@@ -477,7 +673,39 @@ void audit_rotated_ellipsoid_self_test() {
     boundary[2]=point(std::nextafter(0.75,1.0));
     if(not exact_rotated_ellipsoid_minimum(boundary).empty())
         throw std::runtime_error("ellipsoid audit self-test: strict boundary");
-    std::cout<<"AUDIT_ELLIPSOID_SELF_TEST_OK cases=7\n";
+    // An endpoint at Q=25 may be retained without losing feasibility;
+    // moving it by one binary ulp must yield a strict feasible witness.
+    BinaryBox safe=full;
+    safe[2]={0.25,0.75};
+    if(audit_exact_ellipsoid_contraction(full,safe).lost_faces!=0u)
+        throw std::runtime_error("ellipsoid audit self-test: tangent face");
+    BinaryBox unsound=full;
+    unsound[2].first=std::nextafter(0.25,1.0);
+    auto cut=audit_exact_ellipsoid_contraction(full,unsound);
+    if(cut.lost_faces==0u or cut.witness[2]>=
+       binary_double_as_rational(unsound[2].first)
+       or cut.witness_q>25)
+        throw std::runtime_error("ellipsoid audit self-test: strict loss");
+    BinaryBox safe_other=full;
+    safe_other[2].first=std::nextafter(0.25,0.0);
+    if(audit_exact_ellipsoid_contraction(full,safe_other).lost_faces!=0u)
+        throw std::runtime_error("ellipsoid audit self-test: safe near face");
+    BinaryBox unsound_other=full;
+    unsound_other[0].first=0.5;
+    cut=audit_exact_ellipsoid_contraction(full,unsound_other);
+    if(cut.lost_faces==0u or cut.witness_q>25 or cut.witness[0]>=
+       ExactRational(1)/2)
+        throw std::runtime_error("ellipsoid audit self-test: coordinate loss");
+    BinaryBox tangent_query=full;
+    tangent_query[2]={0.25,0.25};
+    BinaryBox missed_tangent=full;
+    missed_tangent[2].first=0.5;
+    cut=audit_exact_ellipsoid_contraction(tangent_query,missed_tangent);
+    if(cut.lost_faces==0u or cut.witness_q!=25
+       or cut.witness[2]!=ExactRational(1)/4)
+        throw std::runtime_error(
+            "ellipsoid audit self-test: strict outside tangent");
+    std::cout<<"AUDIT_ELLIPSOID_SELF_TEST_OK cases=12\n";
 }
 
 struct EllipsoidAuditStatistics {
@@ -1812,6 +2040,7 @@ void compare_adaptive_shaving(Selection const& selection,
     char const* labels[]={"budget","resolution"};
     AdaptiveComparison comparisons[2];
     SizeType production_separated=0u;
+    IncomparableAuditStatistics incomparables;
     for(SizeType q=0u;q<records.size();++q) {
         UpperBoxType production=problem.initial_domain;
         solver.reduce(production,problem.function,codomains[q]);
@@ -1910,6 +2139,15 @@ void compare_adaptive_shaving(Selection const& selection,
                 ++result.weaker;
             } else {
                 ++result.incomparable;
+                if(selection.audit_resolution_incomparables and method==1u) {
+                    if(definitely(production.is_empty())
+                       or definitely(candidate.is_empty()))
+                        throw std::runtime_error(
+                            "unexpected empty box in incomparable audit");
+                    audit_resolution_incomparable_case(
+                        q,records[q],oracle[q],production,candidate,
+                        incomparables);
+                }
             }
         }
     }
@@ -1959,6 +2197,30 @@ void compare_adaptive_shaving(Selection const& selection,
                      <<" candidate_only_false_positive="<<audit.false_positive[method]
                      <<"\n";
         }
+    }
+    if(selection.audit_resolution_incomparables) {
+        if(incomparables.cases!=comparisons[1].incomparable
+           or incomparables.cases!=incomparables.empty_geometry
+                                    +incomparables.feasible_geometry
+           or incomparables.both_sound>incomparables.feasible_geometry)
+            throw std::runtime_error(
+                "inconsistent exact incomparable audit counters");
+        std::cout<<"AUDIT_INCOMPARABLE_SUMMARY method=resolution"
+                 <<" queries="<<records.size()
+                 <<" incomparable="<<incomparables.cases
+                 <<" empty_geometry="<<incomparables.empty_geometry
+                 <<" feasible_geometry="<<incomparables.feasible_geometry
+                 <<" both_sound="<<incomparables.both_sound
+                 <<" production_loss_cases="
+                     <<incomparables.production_loss_cases
+                 <<" candidate_loss_cases="
+                     <<incomparables.candidate_loss_cases
+                 <<" cut_faces_checked="<<incomparables.cut_faces_checked
+                 <<"\n";
+        if(incomparables.production_loss_cases!=0u
+           or incomparables.candidate_loss_cases!=0u)
+            throw std::runtime_error(
+                "exact incomparable audit found a lost feasible point");
     }
     if(shape=="rotated-ellipsoid"
        and (audit.baseline_false_positive!=0u
@@ -2431,11 +2693,22 @@ int main(int argc,char const* argv[]) {
                or selection.compare_dependency_skip
                or selection.profile_residual_shaving
                or selection.compare_adaptive_shaving
-               or selection.compare_adaptive_cache)
+               or selection.compare_adaptive_cache
+               or selection.audit_resolution_incomparables)
                 throw std::invalid_argument(
                     "ellipsoid self-test cannot be combined with replay modes");
             audit_rotated_ellipsoid_self_test();
             return 0;
+        }
+        if(selection.audit_resolution_incomparables) {
+            if(not selection.compare_adaptive_shaving
+               or selection.trace_prefix.empty()
+               or selection.shapes.size()!=1u
+               or selection.shapes.front()!="rotated-ellipsoid")
+                throw std::invalid_argument(
+                    "--audit-resolution-incomparables requires"
+                    " --compare-adaptive-shaving, --trace-prefix and"
+                    " --shapes rotated-ellipsoid");
         }
         unsigned const modes=
             static_cast<unsigned>(selection.compare_contained_skip)
