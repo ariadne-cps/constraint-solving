@@ -320,12 +320,12 @@ remains meaningful after the promotion.
 
 ### P2 — Static variable dependencies
 
-**Status:** diagnostic prototype implemented in
-`benchmarks/benchmark_constraint_reduce.cpp` using
-`--compare-dependency-skip`. No production change; local
-compile, correctness replay, and timing are pending. The
-`propagate()` implementation already uses related procedure
-dependency extraction.
+**Status: rejected as a general optimization for the uncompiled
+production `reduce()` API (2026-11-08).** The complete adaptive
+trace replay passed, but reconstructing static dependencies for
+each call slowed all five shapes. The opt-in diagnostic remains
+available in the benchmark; a future prepared-function interface
+could enable a different tradeoff.
 
 A contractor for `f_i` with respect to coordinate `j`
 cannot shave based on changing `j` if `f_i` provably does
@@ -368,17 +368,58 @@ Run from `constraint-solving` with existing d4/f3 traces:
 ```sh
 cmake --build build-release --target benchmark_constraint_reduce
 ./build-release/benchmarks/benchmark_constraint_reduce \
-  --trace-prefix "$HOME/ariadne-benchmark-traces/outer" \
+  --trace-prefix "$HOME/Downloads/traces/outer" \
   --compare-dependency-skip --verify-only --concurrency 0
 ./build-release/benchmarks/benchmark_constraint_reduce \
-  --trace-prefix "$HOME/ariadne-benchmark-traces/outer" \
+  --trace-prefix "$HOME/Downloads/traces/outer" \
   --compare-dependency-skip --concurrency 0
 ```
 
 Do not interpret a zero or small `dependency_skipped` count as a
 bug: the remaining nonlinear outputs may use all input coordinates.
-Promote no P2 production changes until the measured speedup including
-realistic preparation cost is positive on independent workloads.
+P2 is **not** to be promoted through the current API.
+
+#### P2 actual adaptive replay results — macOS Release, 2026-11-08
+
+The operator completed the correctness-only and timed
+`--compare-dependency-skip` runs against five d4/f3 traces
+at `$HOME/Downloads/traces/outer`. All five runs reported
+`DEPENDENCY_SKIP_VERIFIED`: the candidate produced exactly
+the same final upper boxes as the current P1 production solver
+and frozen legacy full scan, and matched the exported paving
+separation bits, on **9,167 adaptive queries**.
+
+| Shape | Queries | Static dependency edges | Additional box calls skipped | Box calls executed | P1 median ms | Prepared median ms | Rebuilt median ms | Prepared speedup | Rebuilt speedup |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| aligned-box | 2927 | 12/48 | 0 | 0 | 52.57417 | 52.02363 | 84.74917 | 1.011x | 0.620x |
+| rotated-box | 2591 | 16/48 | 10756 | 10914 | 208.11783 | 179.28250 | 219.88029 | 1.161x | 0.947x |
+| aligned-ellipsoid | 1127 | 8/20 | 0 | 17617 | 354.84821 | 354.85913 | 365.53246 | 1.000x | 0.971x |
+| rotated-ellipsoid | 1055 | 8/20 | 0 | 22534 | 583.24437 | 583.42346 | 598.61592 | 1.000x | 0.974x |
+| ball | 1467 | 8/20 | 0 | 21720 | 427.80558 | 428.24942 | 442.52763 | 0.999x | 0.967x |
+
+The filter eliminated **10,756** more box calls, exclusively
+for rotated-box, reducing that shape from 21,670 to 10,914
+surviving calls. That workload also triggered 156 conservative
+disjointness fallback events. There were no extra eliminations
+for the other four shapes, because P1 already skipped the
+certified-satisfied constraints and the surviving nonlinear
+ones use all four input coordinates. Static sparse edge counts
+are not interchangeable with actual runtime savings.
+
+The **geometric mean of the five per-shape median speedups**
+is **1.032x prepared**, versus **0.883x rebuilt per query**.
+Sums of medians are 1626.59 ms for P1, 1597.84 ms prepared,
+and 1711.31 ms rebuilt; the summed ratio is a different metric.
+Each complete sweep used seven samples, one iteration per sample.
+These are independent fixed-order measurements and may include
+order or thermal effects; they are not a universal runtime claim.
+
+**Decision:** do **not** compile dependency masks inside each
+production `reduce()` call. Retain P2 as an isolated benchmark
+for future prepared-function interfaces or other sparse workloads.
+Prioritize profiling the **surviving nonlinear shaving work**
+before attempting adaptive search, contractor ordering, or new
+subdivision strategies.
 
 ### P3 — Incremental worklist / wake-up scheduling
 
@@ -415,7 +456,11 @@ benchmark and validate before adopting.
 
 ### P5 — Better shaving search and subdivision
 
-**Status:** exploratory, highest proof and maintenance cost.
+**Status:** next profiling priority after P2's negative
+realistic setup-cost result. Quantify the surviving nonlinear
+`box_reduce` calls and interval function evaluations before
+selecting a search algorithm; any changed contractor has a
+larger correctness and maintenance burden.
 
 `box_reduce` currently scans up to eight lower slices and
 the remaining upper slices. Adaptive slice counts, reuse of
@@ -556,16 +601,16 @@ mkdir -p "$HOME/ariadne-benchmark-traces"
   ./build-release/benchmarks/benchmark_paving_backends \
     --dimensions 4 --finenesses 3 \
     --shapes aligned-box,rotated-box,aligned-ellipsoid,rotated-ellipsoid,ball \
-    --outer-trace-prefix "$HOME/ariadne-benchmark-traces/outer" \
+    --outer-trace-prefix "$HOME/Downloads/traces/outer" \
     --concurrency 0
 )
 ls -lh "$HOME/ariadne-benchmark-traces/"*.trace
 cmake --build build-release --target benchmark_constraint_reduce
 ./build-release/benchmarks/benchmark_constraint_reduce \
-  --trace-prefix "$HOME/ariadne-benchmark-traces/outer" \
+  --trace-prefix "$HOME/Downloads/traces/outer" \
   --concurrency 0
 ./build-release/benchmarks/benchmark_constraint_reduce \
-  --trace-prefix "$HOME/ariadne-benchmark-traces/outer" \
+  --trace-prefix "$HOME/Downloads/traces/outer" \
   --compare-contained-skip --concurrency 0
 ```
 
@@ -593,6 +638,8 @@ can be added for correctness-only replay.
 | 2026-11-08 | After green local test run, promote validated containment caching into vector `ConstraintSolver::reduce()`. Keep the frozen old full-scan only in benchmark as an independent speed/equivalence baseline; unit tests exercise production behavior and invariants directly, with no experimental loop copy. | Production change committed; cross-platform CI and post-promotion trace comparison pending |
 
 | 2026-11-08 | Added opt-in P2 static-dependency benchmark with certified procedure-index masks; verifies against production and frozen legacy full scan on adaptive traces, and measures both prepared-once and rebuild-per-query costs. | Diagnostic implementation committed; correctness and speed pending |
+
+| 2026-11-08 | P2 replay validated identical final domains and certified separations on 9,167 queries; only rotated-box skipped 10,756 more box calls. Geometric-mean speedups were 1.032x prepared and 0.883x rebuilt per query. | Reject general per-call dependency compilation; retain P2 diagnostic and profile residual nonlinear shaving next |
 
 ### Update protocol
 
