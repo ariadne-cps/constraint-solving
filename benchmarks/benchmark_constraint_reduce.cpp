@@ -49,6 +49,7 @@ struct Selection {
     Bool compare_dependency_skip=false;
     Bool profile_residual_shaving=false;
     Bool compare_adaptive_shaving=false;
+    Bool compare_adaptive_cache=false;
     unsigned adaptive_depth=8u;
     unsigned adaptive_budget=8u;
     unsigned adaptive_resolution_budget=64u;
@@ -99,6 +100,7 @@ void print_usage(char const* program) {
              <<"  --compare-dependency-skip  Try static procedure-dependency shaving\n"
              <<"  --profile-residual-shaving Profile P1 surviving box calls (0..8 evals)\n"
              <<"  --compare-adaptive-shaving Compare 8-slice vs adaptive shaving\n"
+             <<"  --compare-adaptive-cache   Benchmark reuse of tested dyadic cells\n"
              <<"  --adaptive-depth N         Maximum dyadic depth (1..12; default 8)\n"
              <<"  --adaptive-budget N        Tight evaluation budget (>=2; default 8)\n"
              <<"  --adaptive-resolution-budget N Evaluation cap for depth-limited mode (default 64)\n"
@@ -131,6 +133,10 @@ Bool parse_arguments(int argc,char const* argv[],Selection& selection) {
         }
         if(argument=="--compare-adaptive-shaving") {
             selection.compare_adaptive_shaving=true;
+            continue;
+        }
+        if(argument=="--compare-adaptive-cache") {
+            selection.compare_adaptive_cache=true;
             continue;
         }
         if(i+1>=argc) {
@@ -1441,6 +1447,8 @@ struct AdaptiveShavingStatistics {
     SizeType depth_stops=0u;
     SizeType certified_outputs=0u;
     SizeType rounds=0u;
+    SizeType cell_visits=0u;
+    SizeType cache_hits=0u;
 };
 
 // The production solver's affine() interpolation helper is local to
@@ -1456,7 +1464,8 @@ Bool adaptive_box_reduce(UpperBoxType& domain,
                          ValidatedScalarMultivariateFunction const& function,
                          ExactIntervalType const& bounds,SizeType variable,
                          AdaptiveShavingSettings const& settings,
-                         AdaptiveShavingStatistics* stats=nullptr) {
+                         AdaptiveShavingStatistics* stats=nullptr,
+                         bool reuse_evaluations=false) {
     if(stats) ++stats->calls;
     if(definitely(domain.is_empty())) return true;
     if(definitely(domain[variable].lower_bound()
@@ -1467,6 +1476,12 @@ Bool adaptive_box_reduce(UpperBoxType& domain,
     FloatDPApproximation const upper=original.upper_bound();
     UpperIntervalType narrowed=original;
     struct Cell { unsigned depth; unsigned index; };
+    struct CachedProof { unsigned depth; unsigned index; bool disjoint; };
+    // Per-box_reduce cache only: the other input coordinates are fixed
+    // throughout these two boundary scans, but change in later calls.
+    std::vector<CachedProof> cache;
+    if(reuse_evaluations)
+        cache.reserve(std::min(settings.evaluation_budget,64u));
     bool entire_domain_excluded=false;
 
     auto scan=[&](bool from_lower,unsigned budget)->bool {
@@ -1481,12 +1496,31 @@ Bool adaptive_box_reduce(UpperBoxType& domain,
             ExactIntervalType const interval(
                 cast_exact(adaptive_affine(lower,upper,index,parts)),
                 cast_exact(adaptive_affine(lower,upper,index+1u,parts)));
-            UpperBoxType slice=domain;
-            slice[variable]=interval;
             ++used;
-            if(stats) ++stats->evaluations;
-            if(definitely(disjoint(
-                    Ariadne::apply(function,slice),bounds))) {
+            if(stats) ++stats->cell_visits;
+            bool disjoint_proof=false;
+            bool cache_hit=false;
+            if(reuse_evaluations) {
+                for(CachedProof const& proof:cache) {
+                    if(proof.depth==cell.depth and proof.index==cell.index) {
+                        disjoint_proof=proof.disjoint;
+                        cache_hit=true;
+                        break;
+                    }
+                }
+            }
+            if(cache_hit) {
+                if(stats) ++stats->cache_hits;
+            } else {
+                UpperBoxType slice=domain;
+                slice[variable]=interval;
+                if(stats) ++stats->evaluations;
+                disjoint_proof=definitely(disjoint(
+                    Ariadne::apply(function,slice),bounds));
+                if(reuse_evaluations)
+                    cache.push_back({cell.depth,cell.index,disjoint_proof});
+            }
+            if(disjoint_proof) {
                 if(stats) ++stats->rejected_cells;
                 if(from_lower) {
                     narrowed.set_lower_bound(interval.upper_bound());
@@ -1549,7 +1583,8 @@ Bool reduce_adaptive_shaving(
         ValidatedVectorMultivariateFunction const& function,
         ExactBoxType const& codomain,
         AdaptiveShavingSettings const& settings,
-        AdaptiveShavingStatistics* stats=nullptr) {
+        AdaptiveShavingStatistics* stats=nullptr,
+        bool reuse_evaluations=false) {
     const ExactDouble MINIMUM_REDUCTION=0.75_x;
     if(definitely(domain.is_empty())) return true;
     std::vector<Bool> certified(codomain.size(),false);
@@ -1572,7 +1607,8 @@ Bool reduce_adaptive_shaving(
             }
             for(SizeType j=0u;j<domain.size();++j) {
                 if(adaptive_box_reduce(
-                        domain,function[i],codomain[i],j,settings,stats))
+                        domain,function[i],codomain[i],j,settings,stats,
+                        reuse_evaluations))
                     return true;
             }
         }
@@ -1765,6 +1801,172 @@ void compare_adaptive_shaving(Selection const& selection,
                 " Every excluded interval has a validated disjointness proof."
                 " Witness checks are restricted to certified feasible points."
                 " Only benchmark code changed.\n";
+}
+
+// The cached and uncached dyadic contractors traverse exactly the same
+// cells, spending the same *visit* budget. A memoized image-exclusion
+// proof only avoids another apply() to an identical cell in one box call.
+// The exact final domain must therefore be identical for each query.
+void compare_adaptive_cache(Selection const& selection,
+                            std::string const& shape) {
+    SolverProblem problem=make_problem(shape);
+    std::vector<TraceRecord> const records=
+        read_adaptive_trace(selection.trace_prefix,shape);
+    std::vector<ExactBoxType> codomains;
+    codomains.reserve(records.size());
+    for(auto const& record:records) {
+        ExactBoxType codomain=problem.codomains.front();
+        for(SizeType i=0u;i<4u;++i) codomain[i]=record.box[i];
+        codomains.push_back(std::move(codomain));
+    }
+
+    ConstraintSolver solver;
+    AdaptiveShavingSettings const settings[]={
+        {selection.adaptive_depth,selection.adaptive_budget},
+        {selection.adaptive_depth,selection.adaptive_resolution_budget}
+    };
+    char const* labels[]={"budget","resolution"};
+    for(unsigned method=0u;method!=2u;++method) {
+        AdaptiveShavingStatistics uncached_stats;
+        AdaptiveShavingStatistics cached_stats;
+        SizeType changed_from_production=0u;
+        SizeType extra_empty=0u;
+        SizeType missed_empty=0u;
+        SizeType separated=0u;
+        for(SizeType q=0u;q<codomains.size();++q) {
+            UpperBoxType production=problem.initial_domain;
+            solver.reduce(production,problem.function,codomains[q]);
+            UpperBoxType frozen=problem.initial_domain;
+            reduce_full_scan_reference(
+                solver,frozen,problem.function,codomains[q]);
+            if(not same(production,frozen))
+                throw std::runtime_error(
+                    "adaptive cache baseline differs from frozen full scan"
+                    " shape="+shape+" query="+std::to_string(q));
+            if(definitely(production.is_empty())!=records[q].separated)
+                throw std::runtime_error(
+                    "adaptive cache baseline differs from paving separation"
+                    " shape="+shape+" query="+std::to_string(q));
+
+            UpperBoxType uncached=problem.initial_domain;
+            reduce_adaptive_shaving(
+                solver,uncached,problem.function,codomains[q],
+                settings[method],&uncached_stats,false);
+            UpperBoxType cached=problem.initial_domain;
+            reduce_adaptive_shaving(
+                solver,cached,problem.function,codomains[q],
+                settings[method],&cached_stats,true);
+            if(not same(cached,uncached))
+                throw std::runtime_error(
+                    "memoized adaptive shaving changed contracted domain"
+                    " shape="+shape+" method="+labels[method]
+                    +" query="+std::to_string(q));
+            if(not same(uncached,production)) ++changed_from_production;
+            Bool const before_empty=definitely(production.is_empty());
+            Bool const candidate_empty=definitely(cached.is_empty());
+            extra_empty+=static_cast<SizeType>(
+                candidate_empty and not before_empty);
+            missed_empty+=static_cast<SizeType>(
+                not candidate_empty and before_empty);
+            separated+=static_cast<SizeType>(candidate_empty);
+        }
+        if(uncached_stats.cache_hits!=0u
+           or uncached_stats.evaluations!=uncached_stats.cell_visits
+           or cached_stats.cell_visits!=uncached_stats.cell_visits
+           or cached_stats.evaluations+cached_stats.cache_hits
+              !=cached_stats.cell_visits
+           or cached_stats.calls!=uncached_stats.calls
+           or cached_stats.rounds!=uncached_stats.rounds
+           or cached_stats.changed_calls!=uncached_stats.changed_calls
+           or cached_stats.emptied_calls!=uncached_stats.emptied_calls
+           or cached_stats.rejected_cells!=uncached_stats.rejected_cells
+           or cached_stats.depth_stops!=uncached_stats.depth_stops
+           or cached_stats.budget_stops!=uncached_stats.budget_stops)
+            throw std::runtime_error(
+                "memoized adaptive shaving changed visit sequence or counters");
+        if(cached_stats.evaluations>cached_stats.calls*
+              static_cast<SizeType>(settings[method].evaluation_budget))
+            throw std::runtime_error("cached adaptive evaluation budget exceeded");
+
+        std::cout<<"ADAPTIVE_CACHE_VERIFIED shape="<<shape
+                 <<" method="<<labels[method]
+                 <<" queries="<<records.size()
+                 <<" contracted_boxes_changed_vs_production="
+                    <<changed_from_production
+                 <<" candidate_separated="<<separated
+                 <<" candidate_only_empty="<<extra_empty
+                 <<" production_only_empty="<<missed_empty
+                 <<" box_calls="<<cached_stats.calls
+                 <<" cell_visits="<<cached_stats.cell_visits
+                 <<" uncached_evaluations="<<uncached_stats.evaluations
+                 <<" cached_evaluations="<<cached_stats.evaluations
+                 <<" cache_hits="<<cached_stats.cache_hits
+                 <<" reused_pct="<<std::fixed<<std::setprecision(2)
+                    <<(cached_stats.cell_visits
+                        ?100.0*static_cast<double>(cached_stats.cache_hits)
+                             /cached_stats.cell_visits:0.0)
+                 <<" budget_stops="<<cached_stats.budget_stops
+                 <<" depth_stops="<<cached_stats.depth_stops
+                 <<"\n";
+        if(selection.verify_only) continue;
+
+        auto production_work=[&] {
+            SizeType checksum=0u;
+            for(auto const& codomain:codomains) {
+                UpperBoxType domain=problem.initial_domain;
+                solver.reduce(domain,problem.function,codomain);
+                checksum+=static_cast<SizeType>(definitely(domain.is_empty()));
+                keep_alive(domain);
+            }
+            return checksum;
+        };
+        auto adaptive_work=[&](bool cache_enabled) {
+            SizeType checksum=0u;
+            for(auto const& codomain:codomains) {
+                UpperBoxType domain=problem.initial_domain;
+                reduce_adaptive_shaving(
+                    solver,domain,problem.function,codomain,
+                    settings[method],nullptr,cache_enabled);
+                checksum+=static_cast<SizeType>(definitely(domain.is_empty()));
+                keep_alive(domain);
+            }
+            return checksum;
+        };
+        if(adaptive_work(false)!=separated
+           or adaptive_work(true)!=separated)
+            throw std::runtime_error("adaptive cache timed checksum mismatch");
+
+        Timing const production_time=median_ms(production_work,selection);
+        Timing const uncached_time=median_ms(
+            [&]{return adaptive_work(false);},selection);
+        Timing const cached_time=median_ms(
+            [&]{return adaptive_work(true);},selection);
+        double const cache_speedup=
+            uncached_time.milliseconds/cached_time.milliseconds;
+        double const production_speedup=
+            production_time.milliseconds/cached_time.milliseconds;
+        if(not std::isfinite(cache_speedup)
+           or not std::isfinite(production_speedup)
+           or cache_speedup<=0.0 or production_speedup<=0.0)
+            throw std::runtime_error("invalid adaptive cache speedup");
+
+        std::cout<<"ADAPTIVE_CACHE_COMPARE shape="<<shape
+                 <<" method="<<labels[method]
+                 <<" production_median_ms="<<std::fixed<<std::setprecision(5)
+                     <<production_time.milliseconds
+                 <<" uncached_median_ms="<<uncached_time.milliseconds
+                 <<" cached_median_ms="<<cached_time.milliseconds
+                 <<" cache_speedup="<<std::setprecision(3)<<cache_speedup
+                 <<" production_to_cached_speedup="<<production_speedup
+                 <<" samples="<<selection.samples
+                 <<"\n";
+    }
+    std::cout<<"ADAPTIVE_CACHE_NOTE: each mode keeps the identical"
+                " cell-visit budget and order for cached and uncached runs."
+                " Memoization is local to one box_reduce; final boxes must"
+                " match exactly. Different domains from P1 production are"
+                " still diagnostic and are not endorsed for promotion."
+                " Independent medians are fixed-order measurements.\n";
 }
 
 struct Datum {
@@ -2015,7 +2217,8 @@ int main(int argc,char const* argv[]) {
             static_cast<unsigned>(selection.compare_contained_skip)
             +static_cast<unsigned>(selection.compare_dependency_skip)
             +static_cast<unsigned>(selection.profile_residual_shaving)
-            +static_cast<unsigned>(selection.compare_adaptive_shaving);
+            +static_cast<unsigned>(selection.compare_adaptive_shaving)
+            +static_cast<unsigned>(selection.compare_adaptive_cache);
         if(modes>1u)
             throw std::invalid_argument(
                 "comparison and profiling modes are mutually exclusive");
@@ -2029,6 +2232,8 @@ int main(int argc,char const* argv[]) {
                     profile_residual_shaving(selection,shape);
                 } else if(selection.compare_adaptive_shaving) {
                     compare_adaptive_shaving(selection,shape);
+                } else if(selection.compare_adaptive_cache) {
+                    compare_adaptive_cache(selection,shape);
                 } else {
                     profile_adaptive_trace(
                         selection.trace_prefix,shape,selection.verify_only);

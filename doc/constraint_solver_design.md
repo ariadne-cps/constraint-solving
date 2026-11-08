@@ -690,6 +690,56 @@ evaluation-cost-to-contraction benefit on the affected
 output-coordinate pairs, and strengthen adversarial
 correctness tests before changing the contractor.
 
+#### P5 evaluation reuse experiment (benchmark only, 2026-11-08)
+
+The original adaptive prototype traverses dyadic cells separately
+from the lower and upper boundaries, revisiting the root and
+sometimes other dyadic nodes. Its new opt-in mode,
+\`--compare-adaptive-cache\`, records the identity of a node
+(\`depth,index\`) and its validated exclusion decision within
+a **single coordinate contractor invocation**. On a repeated
+visit, the contractor reuses that decision without repeating
+\`apply(function,slice)\`. It must never reuse a proof after
+the domain or another coordinate has changed.
+
+The evaluation **budget is counted in visited cells, not
+cached misses**. This deliberately preserves the old candidate's
+traversal order and stopping points, yielding *exactly the
+same contracted boxes* between cached and uncached adaptive
+variants. The benchmark checks this equality for every adaptive
+query and confirms matching call, round, contraction and
+budget/depth-stop counters. It also checks the untouched
+production solver against the frozen legacy reference and
+the original paving separation bits.
+
+For each of \`budget\` (8 visits) and \`resolution\` (64 visits)
+the benchmark prints \`ADAPTIVE_CACHE_VERIFIED\` with visits,
+actual function evaluations, cache hits, and separation counts;
+and \`ADAPTIVE_CACHE_COMPARE\` with seven-sample median
+times for production, uncached dyadic traversal and cached
+dyadic traversal. The instrumentation uses a per-call vector
+of memoized decisions, so lookup and allocation overhead are
+included in the real timing; a smaller evaluation count does
+not imply a wall-time improvement.
+
+\`\`\`sh
+cmake --build build-release --target benchmark_constraint_reduce
+./build-release/benchmarks/benchmark_constraint_reduce \\
+  --trace-prefix "$HOME/Downloads/traces/outer" \\
+  --compare-adaptive-cache --verify-only --concurrency 0
+./build-release/benchmarks/benchmark_constraint_reduce \\
+  --trace-prefix "$HOME/Downloads/traces/outer" \\
+  --compare-adaptive-cache --samples 7 --concurrency 0
+\`\`\`
+
+**Scope:** the cache is an implementation optimization of the
+*existing diagnostic adaptive algorithm*, not of the current
+eight-slice production \`box_reduce()\`. Even if it is faster
+than uncached dyadic traversal, the previously measured weaker
+contractions and candidate-only empty cases remain a barrier
+to production promotion. Compilation and operator measurements
+for this new mode are pending.
+
 Do **not** promote an adaptive variant merely because its
 loop is cheaper. Its contraction strength, certified
 separation count, and feasible-witness preservation are
@@ -886,6 +936,8 @@ can be added for correctness-only replay.
 | 2026-11-08 | P5 adaptive correctness-only replay passed baseline equivalence on 9,167 queries; budget-8 used 556,267 versus 357,582 production evaluations, resolution-cap-64 used 1,210,649. The resolution candidate returned 28 additional empty results on rotated-ellipsoid, not independently proved. | Keep both prototypes diagnostic; inspect duplicated dyadic evaluations and strengthen correctness validation before any promotion |
 
 | 2026-11-08 | Completed P5 seven-sample adaptive replay timings. Geomean P1-relative speedup: budget-8 0.909x, depth-8/cap-64 0.596x. Rotated-ellipsoid budget-8 alone achieved 1.621x but weakened 324/1055 boxes. | Reject both adaptive variants for production; retain diagnostic and investigate duplicated evaluations and contraction strength separately |
+
+| 2026-11-08 | Added per-box-call dyadic exclusion-decision cache with identical visit order and visit budget; opt-in benchmark reports verified domain equivalence to uncached adaptive shaving, cache hits, evaluation reduction and timed comparison including cache overhead. | Prototype committed; build and operator results pending |
 
 ### Update protocol
 
