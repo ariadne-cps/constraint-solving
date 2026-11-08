@@ -130,20 +130,48 @@ auto ConstraintSolver::feasible(const ExactBoxType& domain,
     return make_pair(ValidatedKleenean(LogicalValue::INDETERMINATE),ExactPointType());
 }
 
-Bool ConstraintSolver::reduce(UpperBoxType& domain, const ValidatedVectorMultivariateFunction& function, const ExactBoxType& codomain) const
+struct PreparedConstraintSolverFunction::Data {
+    ValidatedVectorMultivariateFunction function;
+    Vector<ValidatedProcedure> hull_procedure;
+
+    explicit Data(const ValidatedVectorMultivariateFunction& value)
+        : function(value), hull_procedure(function) { }
+};
+
+PreparedConstraintSolverFunction::PreparedConstraintSolverFunction(
+        const ValidatedVectorMultivariateFunction& function)
+    : _data(std::make_shared<const Data>(function)) { }
+
+Bool ConstraintSolver::reduce(
+        UpperBoxType& domain, const ValidatedVectorMultivariateFunction& function,
+        const ExactBoxType& codomain) const
 {
-    const ExactDouble MINIMUM_REDUCTION = 0.75_x;
     ARIADNE_PRECONDITION(function.argument_size()==domain.size());
     ARIADNE_PRECONDITION(function.result_size()==codomain.size());
-
     if(definitely(domain.is_empty())) { return true; }
-
-    // The vector hull reduction depends only on the function, not on the
-    // changing box or codomain. Compile it once for this reduce() call and
-    // reuse the same vector procedure in every hull round.
-    // Do not cache across calls: functions/precisions may differ.
     Vector<ValidatedProcedure> const hull_procedure(function);
+    return this->_reduce_with_hull(domain,function,hull_procedure,codomain);
+}
 
+Bool ConstraintSolver::reduce(
+        UpperBoxType& domain, const PreparedConstraintSolverFunction& prepared,
+        const ExactBoxType& codomain) const
+{
+    const auto& data=*prepared._data;
+    ARIADNE_PRECONDITION(data.function.argument_size()==domain.size());
+    ARIADNE_PRECONDITION(data.function.result_size()==codomain.size());
+    if(definitely(domain.is_empty())) { return true; }
+    return this->_reduce_with_hull(
+        domain,data.function,data.hull_procedure,codomain);
+}
+
+Bool ConstraintSolver::_reduce_with_hull(
+        UpperBoxType& domain,
+        const ValidatedVectorMultivariateFunction& function,
+        const Vector<ValidatedProcedure>& hull_procedure,
+        const ExactBoxType& codomain) const
+{
+    const ExactDouble MINIMUM_REDUCTION = 0.75_x;
     // Once a validated image is contained in its codomain, this output
     // cannot exclude any point in the current or a subsequently contracted
     // domain. Cache the proof within this call, never across queries.

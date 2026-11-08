@@ -1329,6 +1329,55 @@ class TestConstraintSolver : public Ariadne::Testing::ContextFixture
             })))));
     }
 
+    Void test_prepared_reduce_matches_production() {
+        ConstraintSolver solver;
+        auto x=ValidatedScalarMultivariateFunction::coordinates(2);
+        ValidatedVectorMultivariateFunction function({
+            x[0]+x[1],x[0]*x[1],x[0]-x[1]
+        });
+        PreparedConstraintSolverFunction const prepared(function);
+        PreparedConstraintSolverFunction const shared(prepared);
+        ExactBoxType const initial({
+            {0.0_x,1.0_x},{0.0_x,1.0_x}
+        });
+        std::vector<ExactBoxType> codomains({
+            ExactBoxType({{-1.0_x,3.0_x},{-1.0_x,2.0_x},{-2.0_x,2.0_x}}),
+            ExactBoxType({{0.75_x,1.25_x},{0.0_x,0.25_x},{-0.25_x,0.25_x}}),
+            ExactBoxType({{3.0_x,4.0_x},{0.0_x,1.0_x},{-1.0_x,1.0_x}})
+        });
+        // Alternate codomains and repeat, covering reused, independently
+        // copied prepared contexts and certified-empty outcomes.
+        for(SizeType repetition=0u;repetition!=3u;++repetition) {
+            for(SizeType index=0u;index<codomains.size();++index) {
+                UpperBoxType reference=initial;
+                UpperBoxType candidate=initial;
+                Bool const baseline=solver.reduce(reference,function,codomains[index]);
+                Bool const prepped=solver.reduce(
+                    candidate,(repetition%2u==0u?prepared:shared),
+                    codomains[index]);
+                ARIADNE_TESTING_EXPECT_EQUAL(baseline,prepped);
+                ARIADNE_TESTING_EXPECT_SAME(reference,candidate);
+            }
+        }
+
+        // The prepared object owns a function value beyond the source's
+        // lexical lifetime; a second function cannot contaminate it.
+        auto make_prepared=[]() {
+            auto y=ValidatedScalarMultivariateFunction::coordinates(1);
+            ValidatedVectorMultivariateFunction temporary({y[0]*y[0]});
+            return PreparedConstraintSolverFunction(temporary);
+        };
+        PreparedConstraintSolverFunction const owned=make_prepared();
+        auto y=ValidatedScalarMultivariateFunction::coordinates(1);
+        ValidatedVectorMultivariateFunction square({y[0]*y[0]});
+        ExactBoxType const target({{0.25_x,0.5_x}});
+        UpperBoxType reference=ExactBoxType({{-1.0_x,1.0_x}});
+        UpperBoxType candidate=reference;
+        solver.reduce(reference,square,target);
+        solver.reduce(candidate,owned,target);
+        ARIADNE_TESTING_EXPECT_SAME(reference,candidate);
+    }
+
     Void test_reduce_per_query_procedure_lifetime() {
         ConstraintSolver solver;
         auto x=ValidatedScalarMultivariateFunction::coordinates(2);
@@ -1777,6 +1826,7 @@ int main(int argc, char** argv)
     ARIADNE_TESTING_ADD_TEST(TestConstraintSolver, test_precompiled_propagate);
     ARIADNE_TESTING_ADD_TEST(TestConstraintSolver, test_reduce_certified_containment);
     ARIADNE_TESTING_ADD_TEST(TestConstraintSolver, test_reduce_per_query_procedure_lifetime);
+    ARIADNE_TESTING_ADD_TEST(TestConstraintSolver, test_prepared_reduce_matches_production);
     ARIADNE_TESTING_ADD_TEST(TestConstraintSolver, test_reduce_edge_cases);
     ARIADNE_TESTING_ADD_TEST(TestConstraintSolver, test_check_feasibility);
     ARIADNE_TESTING_ADD_TEST(TestConstraintSolver, test_logging_branches);

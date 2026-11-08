@@ -132,6 +132,23 @@ class ConstraintSolverInterface {
 
 
 
+//! \brief An explicitly owned immutable vector function and compiled hull procedure.
+//! \details Safe to reuse across calls with different codomains while the
+//! function is unchanged. Owns its function value (no borrowed pointer), and
+//! shares only immutable preparation data; every reduce() call owns its
+//! temporary domain, containment certificates and numerical scratch space.
+//! No global cache or implicit invalidation policy is used.
+class PreparedConstraintSolverFunction {
+    struct Data;
+    std::shared_ptr<const Data> _data;
+    friend class ConstraintSolver;
+  public:
+    explicit PreparedConstraintSolverFunction(
+        const ValidatedVectorMultivariateFunction& function);
+    PreparedConstraintSolverFunction(const PreparedConstraintSolverFunction&) = default;
+    PreparedConstraintSolverFunction& operator=(const PreparedConstraintSolverFunction&) = default;
+};
+
 //! \ingroup OptimisationSubModule
 //! \brief A class for finding solutions of systems of constraints of the form \f$g(y) \leq c\f$.
 class ConstraintSolver
@@ -144,6 +161,10 @@ class ConstraintSolver
     ValidatedKleenean check_feasibility(const ExactBoxType& domain, const ValidatedVectorMultivariateFunction& function, const ExactBoxType& codomain, const ExactPointType& point) const override;
     //! \brief Try to reduce the size of the domain by propagating interval constraints.
     Bool reduce(UpperBoxType& domain, const ValidatedVectorMultivariateFunction& function, const ExactBoxType& codomain) const override;
+    //! \brief Reduce with a caller-owned prepared function, using the same
+    //! hull/shaving loop and validated semantics as the ordinary overload.
+    //! The prepared data may be shared between calls; call-local state is not.
+    Bool reduce(UpperBoxType& domain, const PreparedConstraintSolverFunction& prepared, const ExactBoxType& codomain) const;
 
 
     //! \brief Test if the constraints are solvable using a nonlinear feasibility test. Returns an approximate feasible point if the result is true. (Deprecated)
@@ -223,6 +244,12 @@ class ConstraintSolver
         return this->monotone_reduce(bx,constraint.function(),constraint.bounds(),j); }
 
     ~ConstraintSolver() override = default;
+  private:
+    Bool _reduce_with_hull(
+        UpperBoxType& domain,
+        const ValidatedVectorMultivariateFunction& function,
+        const Vector<ValidatedProcedure>& hull_procedure,
+        const ExactBoxType& codomain) const;
 };
 
 
