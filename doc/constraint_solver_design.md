@@ -1776,6 +1776,90 @@ ctest --test-dir build-release -R '^test_constraint_solver$' --output-on-failure
 
 | 2026-11-08 | Ubuntu GCC 13 Release CI (`-Werror -Wshadow`) exposed a benchmark-only name collision in the hottest-pair sort comparator: lambda parameter `a` hid the earlier local `a=stats.box_activity`. Renamed the comparator parameters to `lhs_index` / `rhs_index` without changing comparison logic, execution order, benchmark results, or production solver. Also renamed the equally generic parameters in the residual-shaving hot-pair comparator to prevent future shadowing as that code evolves. | macOS replay had already passed; GCC 13 CI compilation of this correction and broader cross-platform results are pending. |
 
+### P7 — Bounded prepared-procedure lifetime (benchmark only)
+
+**Question (2026-11-08):** P6 Prepared saved approximately 5.05%
+of elapsed time relative to current P1 on the five recorded shapes,
+but the existing prepared-hot timing shares one compiled vector
+procedure across an entire shape/workload and estimates its
+construction cost separately. A real caller may run only a small
+number of queries before changing function or destroying its
+prepared context. There is no evidence yet that the measured gain
+survives those shorter lifetimes.
+
+**Implementation:** Extend the existing C++
+`benchmark_constraint_reduce --compare-precompiled-hull`
+mode with the optional `--prepared-batch-size N` parameter.
+The benchmark constructs one
+`Vector<ValidatedProcedure>(problem.function)` for each
+consecutive group of at most N trace queries, reusing it only inside
+that group. Construction happens **inside every calibrated full-trace
+timing sample**; there is no warmed shared procedure excluded from
+that measurement. The live production
+`ConstraintSolver::reduce()`, frozen pre-P6 P1 and
+original P6 Prepared-hot measurements remain unchanged, and the
+original report keys remain available.
+
+For each of the five d4/f3 shape traces, an additional verification
+pass independently compares **every batched result** with the
+actual production P1 result by representation-exact box equality
+and checks the original paving separation bit. The reported
+`preparations` count is the number of vector
+constructions per full trace sweep, namely
+`ceil(queries / N)`. An invariant failure terminates
+the command before recording timings. The new
+`PREPARED_BATCH_VERIFIED`,
+`PREPARED_BATCH_COMPARE`, and
+`PREPARED_BATCH_AGGREGATE` lines, plus an aligned
+table, report measured batch size, number of constructions,
+elapsed medians and speedups against **current production P1**
+(not frozen pre-P6 P1).
+
+At N=1, procedure construction occurs for each query, like current
+production, but uses a different harness loop; do not treat any
+tiny timing difference as an algorithmic gain. At N greater than
+or equal to the shape's trace length, one construction occurs
+per calibrated sweep (unlike Prepared-hot, which constructs once
+outside all sweeps). Intermediate batch sizes such as 8, 32 or
+128 simulate finite explicit lifetimes without adding a production
+cache or API. Batch size is shared across all five shapes, and
+no geometric oracle, query outcome or hidden retrospective
+label affects the batch segmentation.
+
+```sh
+git pull --ff-only
+cmake --build build-release --target benchmark_constraint_reduce
+./build-release/benchmarks/benchmark_constraint_reduce \
+  --trace-prefix "$HOME/Downloads/traces/outer" \
+  --compare-precompiled-hull --prepared-batch-size 32 \
+  --verify-only --concurrency 0
+./build-release/benchmarks/benchmark_constraint_reduce \
+  --trace-prefix "$HOME/Downloads/traces/outer" \
+  --compare-precompiled-hull --prepared-batch-size 32 \
+  --samples 7 --min-sample-ms 12 --concurrency 0
+```
+
+**Status:** implementation is benchmark-only. Compilation, five-shape
+batch equivalence replay and calibrated timing remain pending.
+Positive P7 results would support designing an explicit
+caller-owned prepared context; they would not by themselves
+resolve cross-thread sharing, function lifetime, precision,
+immutability, or multiple-function reuse safety. No modification
+to production is made at P7.
+
+#### CI baseline after P6 and benchmark registration fixes
+
+The repository's two subsequent main commits, `5b84b260`
+(dependency/build updates) and `4baec3dc`
+(registering the benchmark only in standalone builds), are
+acknowledged as the current starting point. At
+`4baec3dc`, Ubuntu, macOS, Windows, Coverage and
+Sanitizers all completed successfully. The previous GCC 13
+shadowing fix (`de0cadb`) is therefore confirmed
+by cross-platform CI, not merely a local AppleClang replay.
+
+| 2026-11-08 | Confirmed main is now at `4baec3dc` after dependency updates and benchmark CMake standalone registration; latest Ubuntu/macOS/Windows/Coverage/Sanitizers workflows are green. Added P7 opt-in `--prepared-batch-size N` to existing P6 benchmark to measure a finite caller-owned vector-procedure lifetime with constructor cost inside each timed full-trace sweep, exact box and trace-bit checks on all five geometries, and Numeric-style batch table/aggregate against current production. | Source and journal updated; C++ build and operator five-shape batch verification/timing pending; no production change, no implicit/global cache. |
+
 ### Update protocol
 
 For every follow-up investigation: add a dated row to the

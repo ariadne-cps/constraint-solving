@@ -56,6 +56,7 @@ struct Selection {
     Bool compare_adaptive_cache=false;
     Bool compare_hybrid_shaving=false;
     Bool compare_precompiled_hull=false;
+    unsigned prepared_batch_size=0u; // 0: unchanged legacy P6 report
     Bool audit_ellipsoid_self_test=false;
     Bool audit_resolution_incomparables=false;
     Bool audit_all_ellipsoid_contractions=false;
@@ -148,6 +149,9 @@ List<ArgumentParser> benchmark_argument_parsers(Selection& s) {
     number("","adaptive-resolution-budget",
            "Resolution evaluation budget (2..4096)",
            s.adaptive_resolution_budget,2u,4096u);
+    number("","prepared-batch-size",
+           "Benchmark only: reconstruct vector hull procedures every N queries",
+           s.prepared_batch_size,1u,100000u);
     parsers.append(make_valued_argument_parser(
         "","trace-prefix","Prefix of exported d4/f3 paving trace files",
         [&s](String const& value)->VoidFunction {
@@ -3122,6 +3126,8 @@ struct PreparedHullRow {
     double per_query_ms=0.0;
     double prepared_ms=0.0;
     double compile_once_ms=0.0;
+    double batch_ms=0.0;
+    SizeType batch_preparations=0u;
     unsigned p1_iterations=0u;
     unsigned per_query_iterations=0u;
     unsigned prepared_iterations=0u;
@@ -3187,6 +3193,45 @@ PreparedHullRow compare_precompiled_hull(
     if(row.schedule.calls!=trace.size()
        or row.schedule.hull_rounds<trace.size())
         throw std::runtime_error("inconsistent P6 prepared hull counters");
+    // An explicitly bounded preparation lifetime: each batch owns its
+    // own immutable vector procedure, reused only for that query block.
+    // Verify every resulting interval against the real production reduce(),
+    // not merely by checking empty-result counts or a single witness.
+    if(selection.prepared_batch_size!=0u) {
+        SizeType verified=0u;
+        for(SizeType begin=0u;begin<codomains.size();) {
+            Vector<ValidatedProcedure> const batch_procedure(problem.function);
+            SizeType const end=std::min(
+                codomains.size(),
+                begin+static_cast<SizeType>(selection.prepared_batch_size));
+            for(SizeType query=begin;query<end;++query) {
+                UpperBoxType candidate=problem.initial_domain;
+                reduce_with_precompiled_hull(
+                    solver,candidate,problem.function,codomains[query],
+                    batch_procedure);
+                UpperBoxType production=problem.initial_domain;
+                solver.reduce(
+                    production,problem.function,codomains[query]);
+                if(not same(candidate,production)
+                   or definitely(candidate.is_empty())!=trace[query].separated)
+                    throw std::runtime_error(
+                        "P7 batch prepared hull differs from production"
+                        " shape="+shape+" query="+std::to_string(query));
+                ++verified;
+            }
+            ++row.batch_preparations;
+            begin=end;
+        }
+        if(verified!=trace.size()
+           or row.batch_preparations!=
+              (trace.size()-1u)/selection.prepared_batch_size+1u)
+            throw std::runtime_error("P7 prepared batch verification counters");
+        LOGGING_PRINTLN("PREPARED_BATCH_VERIFIED shape="<<shape
+            <<" queries="<<verified
+            <<" batch_size="<<selection.prepared_batch_size
+            <<" preparations="<<row.batch_preparations
+            <<" matched_production=true matched_trace=true")
+    }
     LOGGING_PRINTLN("PRECOMPILED_HULL_VERIFIED shape="<<shape
         <<" queries="<<row.queries
         <<" separated="<<row.separated
@@ -3204,14 +3249,35 @@ PreparedHullRow compare_precompiled_hull(
     // "prepared" reuses one vector of procedures for the entire shape.
     auto timed=[&](unsigned variant)->SizeType {
         SizeType separated=0u;
+        if(variant==3u) {
+            // Unlike prepared-hot, this measures preparation *inside*
+            // every timed full-trace sweep, once per bounded query block.
+            for(SizeType begin=0u;begin<codomains.size();) {
+                Vector<ValidatedProcedure> const batch_procedure(
+                    problem.function);
+                SizeType const end=std::min(
+                    codomains.size(),
+                    begin+static_cast<SizeType>(selection.prepared_batch_size));
+                for(SizeType query=begin;query<end;++query) {
+                    UpperBoxType domain=problem.initial_domain;
+                    reduce_with_precompiled_hull(
+                        solver,domain,problem.function,codomains[query],
+                        batch_procedure);
+                    separated+=static_cast<SizeType>(
+                        definitely(domain.is_empty()));
+                    keep_alive(domain);
+                }
+                begin=end;
+            }
+            return separated;
+        }
         for(auto const& codomain:codomains) {
             UpperBoxType domain=problem.initial_domain;
             if(variant==0u) {
                 reduce_pre_p6_reference(
                     solver,domain,problem.function,codomain);
             } else if(variant==1u) {
-                // Measure the actual production implementation of P6,
-                // not an auxiliary benchmark implementation of P1.
+                // Measure the actual production implementation of P6.
                 solver.reduce(domain,problem.function,codomain);
             } else {
                 reduce_with_precompiled_hull(
@@ -3227,6 +3293,10 @@ PreparedHullRow compare_precompiled_hull(
             throw std::runtime_error(
                 "P6 timed query checksum disagrees with verification"
                 " shape="+shape+" variant="+std::to_string(variant));
+    if(selection.prepared_batch_size!=0u
+       and timed(3u)!=row.separated)
+        throw std::runtime_error(
+            "P7 prepared batch timed checksum mismatch shape="+shape);
 
     Timing const p1=median_ms([&]{return timed(0u);},selection);
     Timing const per_query=median_ms([&]{return timed(1u);},selection);
@@ -3242,6 +3312,24 @@ PreparedHullRow compare_precompiled_hull(
     row.per_query_ms=per_query.milliseconds;
     row.prepared_ms=shared.milliseconds;
     row.compile_once_ms=build.milliseconds;
+    if(selection.prepared_batch_size!=0u) {
+        Timing const batched=median_ms([&]{return timed(3u);},selection);
+        row.batch_ms=batched.milliseconds;
+        if(not std::isfinite(row.batch_ms) or row.batch_ms<=0.0)
+            throw std::runtime_error(
+                "P7 invalid batched prepared timing shape="+shape);
+        LOGGING_PRINTLN("PREPARED_BATCH_COMPARE shape="<<shape
+            <<" queries="<<row.queries
+            <<" batch_size="<<selection.prepared_batch_size
+            <<" preparations="<<row.batch_preparations
+            <<" current_p1_ms="<<std::fixed<<std::setprecision(5)
+                <<row.per_query_ms
+            <<" batch_ms="<<row.batch_ms
+            <<" prepared_hot_ms="<<row.prepared_ms
+            <<" batch_speedup_over_current_p1="
+                <<(row.per_query_ms/row.batch_ms)
+            <<" preparation_in_timed_sweep=true")
+    }
     row.p1_iterations=p1.iterations;
     row.per_query_iterations=per_query.iterations;
     row.prepared_iterations=shared.iterations;
@@ -3276,6 +3364,18 @@ void print_precompiled_hull_report(
     LOGGING_PRINTLN("Current production and prepared variants match"
                    " frozen pre-P6 P1, full scan and paving separation bits.")
     if(selection.verify_only) {
+        if(selection.prepared_batch_size!=0u) {
+            SizeType total_queries=0u,total_preparations=0u;
+            for(auto const& item:rows) {
+                total_queries+=item.queries;
+                total_preparations+=item.batch_preparations;
+            }
+            LOGGING_PRINTLN("PREPARED_BATCH_VERIFICATION_TOTAL shapes="
+                <<rows.size()<<" queries="<<total_queries
+                <<" batch_size="<<selection.prepared_batch_size
+                <<" preparations="<<total_preparations
+                <<" matched_production=true")
+        }
         LOGGING_PRINTLN("Correctness-only replay; timing not collected.")
         return;
     }
@@ -3330,6 +3430,48 @@ void print_precompiled_hull_report(
         <<" prepared_hot_total_speedup="<<(total_p1/total_prepared)
         <<" prepared_amortized_total_speedup="
             <<(total_p1/(total_prepared+total_build)))
+    if(selection.prepared_batch_size!=0u) {
+        double current_sum_ms=0.0;
+        double batch_sum_ms=0.0;
+        SizeType total_queries=0u,total_preparations=0u;
+        double log_speedup=0.0;
+        LOGGING_PRINTLN(" ")
+        LOGGING_PRINTLN("Bounded prepared-procedure reuse: batch size "
+            <<selection.prepared_batch_size
+            <<" (construction INCLUDED in each timed full-trace sweep)")
+        LOGGING_PRINTLN(std::string(83u,'-'))
+        LOGGING_PRINTLN(std::left<<std::setw(22)<<"Shape"
+            <<std::right<<std::setw(16)<<"P1 (ms)"
+            <<std::setw(17)<<"Batched (ms)"
+            <<std::setw(16)<<"Batch / P1"
+            <<std::setw(12)<<"Builds")
+        for(auto const& item:rows) {
+            current_sum_ms+=item.per_query_ms;
+            batch_sum_ms+=item.batch_ms;
+            total_queries+=item.queries;
+            total_preparations+=item.batch_preparations;
+            double const speedup=item.per_query_ms/item.batch_ms;
+            log_speedup+=std::log(speedup);
+            LOGGING_PRINTLN(std::left<<std::setw(22)<<item.shape
+                <<std::right<<std::fixed<<std::setprecision(4)
+                <<std::setw(16)<<item.per_query_ms
+                <<std::setw(17)<<item.batch_ms
+                <<std::setw(15)<<speedup<<"x"
+                <<std::setw(12)<<item.batch_preparations)
+        }
+        LOGGING_PRINTLN(std::string(83u,'-'))
+        LOGGING_PRINTLN("PREPARED_BATCH_AGGREGATE shapes="<<rows.size()
+            <<" queries="<<total_queries
+            <<" batch_size="<<selection.prepared_batch_size
+            <<" preparations="<<total_preparations
+            <<" current_p1_sum_ms="<<std::fixed<<std::setprecision(5)
+                <<current_sum_ms
+            <<" batch_sum_ms="<<batch_sum_ms
+            <<" total_speedup="<<(current_sum_ms/batch_sum_ms)
+            <<" geomean_speedup="
+                <<std::exp(log_speedup/static_cast<double>(rows.size()))
+            <<" preparation_in_timed_sweep=true")
+    }
     LOGGING_PRINTLN("Speedup >1 means faster than frozen pre-P6 production P1."
                    " Per-query timing is the current production reduce()."
                    " Prepared-hot timing excludes setup; amortized adds"
@@ -3595,6 +3737,10 @@ int main(int argc,char const* argv[]) {
         }
         if(selection.samples<3u or selection.samples%2u==0u)
             throw std::invalid_argument("samples must be odd and >=3");
+        if(selection.prepared_batch_size!=0u
+           and not selection.compare_precompiled_hull)
+            throw std::invalid_argument(
+                "--prepared-batch-size requires --compare-precompiled-hull");
         if(selection.audit_ellipsoid_self_test) {
             if(not selection.trace_prefix.empty()
                or selection.compare_contained_skip
