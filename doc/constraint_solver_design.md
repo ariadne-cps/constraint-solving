@@ -619,13 +619,15 @@ or scale-invariant stopping tolerance.
 
 The resolution variant reports **28 additional empty boxes**
 for rotated-ellipsoid, while P1 certifies none of those 28
-empty. These are **candidate-only rejection claims**, not
-independently established infeasible queries: the benchmark
+empty. At the time these were **candidate-only rejection claims**,
+not independently established infeasible queries: the benchmark
 checks a single feasible centre candidate per input only
 when its image is independently certified inside the
 codomain. The two methods agree on all recorded P1 empty
-queries. Do not use these 28 new emptiness decisions in
-production paving without stronger validation.
+queries. These 28 additional emptiness decisions have since been independently
+verified for the recorded rotated-ellipsoid queries; see the
+integrated exact audit below. This does not justify production promotion
+without additional general-purpose correctness and performance evidence.
 
 **Decision:** neither prototype is ready for production.
 The next diagnostic is to distinguish repeated interval
@@ -675,8 +677,9 @@ In contrast, the other nonlinear shapes become slower.
 The depth-8, cap-64 resolution approach is slower on every
 nontrivial shape; its extra contractions do not justify
 calling it a performance optimization. The **28 additional
-empty results** on rotated-ellipsoid should remain
-flagged as candidate-only until independently validated.
+empty results** on rotated-ellipsoid were not independently
+validated at the time of this timing experiment; the later exact
+rational audit below proved all 28 empty on the recorded queries.
 The user-provided logs prove the benchmark's programmed
 invariants passed, not universal soundness or parity in
 contraction strength.
@@ -783,8 +786,8 @@ approximately equal, while the sole substantial win,
 324/1055 final boxes and differs in another 60.
 The resolution variant remains substantially slower
 than P1 (geomean 0.662x), and its 28 additional
-`rotated-ellipsoid` empty results remain unverified
-by an independent complete feasibility argument.
+`rotated-ellipsoid` empty results have since been verified by the
+independent complete rational feasibility audit below.
 
 The production benchmark and diagnostic algorithms have
 different contraction behavior. The equality achieved by
@@ -840,20 +843,47 @@ the interior minimum, an exterior point, the exact threshold,
 an edge minimum, initial-domain disjointness, binary-rational
 reconstruction and a just-outside-threshold value.
 
-**Dependency correction:** the initial C++ version accidentally introduced a Boost Multiprecision header not available in the project. Replaced it with the existing Ariadne `numeric/rational.hpp` and the native exact `Rational(ExactDouble)` conversion. This is an implementation correction, not a change to the mathematical oracle; the full C++ build is still pending.
+**Dependency correction:** the initial C++ version accidentally introduced a Boost Multiprecision header not available in the project. Replaced it with the existing Ariadne `numeric/rational.hpp` and the native exact `Rational(ExactDouble)` conversion. This is an implementation correction, not a change to the mathematical oracle; the user subsequently rebuilt and ran the C++ replay successfully;
+this removes the original compile blocker, but no full cross-platform
+build or CI claim follows from it.
 
-**Scope:** this proves or refutes separation claims only for the
-specific rotated-ellipsoid geometry and the trace boxes actually
-replayed. It does **not** prove adaptive dyadic contractor soundness
-for arbitrary functions or coordinates. Previously reported
-28 additional empties remain unverified until this C++ replay is
-run on the operator's original traces.
+**Operator validation, 2026-11-08:** With
+`--trace-prefix "$HOME/Downloads/traces/outer"`, `--shapes
+rotated-ellipsoid`, `--compare-adaptive-shaving` and `--verify-only`,
+the user-supplied completed C++ replay reported **1,055 query
+boxes** and **360 exactly empty** boxes. Of those, production
+separated 296 (no false positives), budget-8 separated the same
+296 (no candidate-only exclusions), and resolution depth-8/cap-64
+separated **324**, including **28/28 candidate-only boxes
+independently proved empty** and **zero false positives**.
+Thus baseline and resolution separated 296/360 (82.22%) and
+324/360 (90%) of the truly empty trace boxes respectively;
+64 and 36 respectively remain unseparated. The 28 exact
+minimum values were 12 cases with Q=100 and 16 with
+Q=2500/13 (approximately 192.31), both well above 25.
+The resolution final boxes were 425 exactly equal, 618
+strictly stronger, 0 strictly weaker and 12 incomparable
+with production. Budget-8 was equal on 671, stronger on 24,
+weaker on 324 and incomparable on 36.
+
+**Scope and risk:** the exact audit supports soundness of the
+reported separation decisions for this geometry and these
+specific trace boxes, not soundness of the dyadic contractor
+for arbitrary functions or coordinates. Nor does it certify
+that all nonempty contracted candidate boxes contain all feasible
+points. The resolution candidate still performs 448,994 box
+evaluations on this shape (versus 85,208 for budget-8) and
+was substantially slower than production in earlier timed
+measurements. The 12 incomparable resolution boxes and
+36 unseparated-but-truly-empty boxes remain useful diagnostic
+targets; results do not justify promotion to production.
 
 **Decision:** retain the memoization diagnostic for reuse
-studies but do not insert it into production. Before any
-further shaving redesign, independently audit the dyadic
-interval partition/exclusion proof (especially the 28
-additional empty results), and seek a strategy that
+studies but do not insert it into production. The specific
+28 additional empty results have passed independent exact
+geometry validation; next investigate the remaining
+incomparable contractions and the general dyadic
+partition/exclusion invariants, and seek a strategy that
 minimizes evaluation cost **without sacrificing contraction
 strength** on nonlinear inputs.
 
@@ -1060,6 +1090,8 @@ can be added for correctness-only replay.
 
 | 2026-11-08 | Added a shape-specific independent exact-arithmetic verifier for the 28 candidate-only rotated-ellipsoid empty results. The benchmark now emits candidate-only zero-based query indices; the Python auditor computes the exact convex quadratic minimum on every query box and checks baseline separation bits. | Auditor self-test passed in development; operator replay on actual traces and C++ rebuild pending |
 | 2026-11-08 | Moved the independent rotated-ellipsoid oracle into `benchmark_constraint_reduce.cpp`, using exact rational arithmetic on original binary-double trace endpoints; both adaptive modes and all baseline separation bits are audited before timing. Removed the Python script and added a C++ seven-case self-test mode. | Full Ariadne build and replay on operator traces remain pending |
+
+| 2026-11-08 | Operator C++ exact-audit replay at `--trace-prefix "$HOME/Downloads/traces/outer"` verified rotated-ellipsoid d4/f3 (1,055 queries): 360 actually empty, production 296 sound separations, resolution 324 sound separations including 28/28 additional exact proofs (12 with Q=100, 16 with Q=2500/13), zero false positives; budget-8 296. Resolution contractions: 425 same, 618 stronger, 0 weaker, 12 incomparable; budget-8: 671 same, 24 stronger, 324 weaker, 36 incomparable. | Close the 28-case audit gap for this trace only; retain adaptive prototypes in benchmarks, no production promotion, analyze incomparable boxes and general soundness separately. |
 
 ### Update protocol
 
