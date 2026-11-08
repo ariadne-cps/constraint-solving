@@ -1,10 +1,10 @@
 # The framework registers this directory and the aggregate benchmarks target.
-# Link production objects plus any Threading objects not already bundled in
+# Link production objects plus any Logging objects not already bundled in
 # ariadne-constraint-solving; do not duplicate transitive object libraries.
-get_target_property(_benchmark_objects threading ARIADNE_PROJECT_OBJECT_TARGETS)
+get_target_property(_benchmark_objects logging ARIADNE_PROJECT_OBJECT_TARGETS)
 get_target_property(_constraint_objects constraint_solving ARIADNE_PROJECT_OBJECT_TARGETS)
 if(NOT _benchmark_objects OR NOT _constraint_objects)
-    message(FATAL_ERROR "Missing registered ConstraintSolving/Threading objects")
+    message(FATAL_ERROR "Missing registered ConstraintSolving/Logging objects")
 endif()
 foreach(_object IN LISTS _constraint_objects)
     list(REMOVE_ITEM _benchmark_objects "${_object}")
