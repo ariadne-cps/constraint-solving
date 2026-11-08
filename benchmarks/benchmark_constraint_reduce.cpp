@@ -1443,6 +1443,15 @@ struct AdaptiveShavingStatistics {
     SizeType rounds=0u;
 };
 
+// The production solver's affine() interpolation helper is local to
+// src/constraint_solver.cpp and is not visible to this benchmark.
+// Keep the same arithmetic here; do not add a shared benchmark header.
+template<class X>
+inline Approximation<X> adaptive_affine(
+        Approximation<X> l,Approximation<X> u,Nat i,Nat n) {
+    return (l*(n-i)+u*i)/n;
+}
+
 Bool adaptive_box_reduce(UpperBoxType& domain,
                          ValidatedScalarMultivariateFunction const& function,
                          ExactIntervalType const& bounds,SizeType variable,
@@ -1458,7 +1467,6 @@ Bool adaptive_box_reduce(UpperBoxType& domain,
     FloatDPApproximation const upper=original.upper_bound();
     UpperIntervalType narrowed=original;
     struct Cell { unsigned depth; unsigned index; };
-    SizeType evaluations=0u;
     bool entire_domain_excluded=false;
 
     auto scan=[&](bool from_lower,unsigned budget)->bool {
@@ -1471,12 +1479,11 @@ Bool adaptive_box_reduce(UpperBoxType& domain,
             Nat const parts=static_cast<Nat>(1u<<cell.depth);
             Nat const index=static_cast<Nat>(cell.index);
             ExactIntervalType const interval(
-                cast_exact(affine(lower,upper,index,parts)),
-                cast_exact(affine(lower,upper,index+1u,parts)));
+                cast_exact(adaptive_affine(lower,upper,index,parts)),
+                cast_exact(adaptive_affine(lower,upper,index+1u,parts)));
             UpperBoxType slice=domain;
             slice[variable]=interval;
             ++used;
-            ++evaluations;
             if(stats) ++stats->evaluations;
             if(definitely(disjoint(
                     Ariadne::apply(function,slice),bounds))) {

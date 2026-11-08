@@ -773,6 +773,8 @@ can be added for correctness-only replay.
 
 | 2026-11-08 | Add benchmark-only adaptive dyadic boundary shaving prototypes: 8-evaluation budget versus depth-limited resolution with a higher cap, validated disjointness proofs, and measurement of contraction-strength changes relative to current P1. | Experiment implemented; compile, independent correctness checks, and timings pending |
 
+| 2026-11-08 | Fixed adaptive benchmark build failure: the solver's file-local `affine()` was not visible in the benchmark. Added a benchmark-local `adaptive_affine()` with identical interpolation arithmetic and removed an unused evaluation variable. | Source corrected; local rebuild/verification pending |
+
 ### Update protocol
 
 For every follow-up investigation: add a dated row to the
