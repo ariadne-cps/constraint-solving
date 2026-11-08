@@ -15,10 +15,9 @@
 
 #include <algorithm>
 #include <array>
-#include <boost/multiprecision/cpp_int.hpp>
+#include "numeric/rational.hpp"
 #include <chrono>
 #include <cmath>
-#include <cstdint>
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
@@ -365,23 +364,15 @@ std::vector<TraceRecord> read_adaptive_trace(
 // A geometry-specific oracle, independent of the adaptive contractor.
 // Arbitrary-precision rationals represent the original trace binary doubles
 // exactly. This is not a general contractor-soundness proof.
-using ExactRational = boost::multiprecision::cpp_rational;
-using ExactInteger = boost::multiprecision::cpp_int;
+using ExactRational = Rational;
 using BinaryBox = std::array<std::pair<double,double>,4u>;
 
 ExactRational binary_double_as_rational(double value) {
     if(not std::isfinite(value))
         throw std::runtime_error("nonfinite ellipsoid trace endpoint");
-    if(value==0.0) return 0;
-    int exponent=0;
-    double mantissa=std::frexp(value,&exponent);
-    auto scaled=static_cast<std::int64_t>(std::ldexp(mantissa,53));
-    ExactRational result{ExactInteger(scaled)};
-    if(exponent>=53)
-        result*=ExactInteger(1) << static_cast<unsigned>(exponent-53);
-    else
-        result/=ExactInteger(1) << static_cast<unsigned>(53-exponent);
-    return result;
+    // Ariadne's Rational(ExactDouble) reconstructs the *exact* IEEE-754
+    // binary fraction. No external arithmetic package is needed.
+    return Rational(ExactDouble(value));
 }
 
 ExactRational rational_clamp(ExactRational const& value,
@@ -1891,8 +1882,8 @@ void compare_adaptive_shaving(Selection const& selection,
                         if(not minimum.intersects_initial_domain)
                             std::cout<<" box_disjoint_from_initial_domain=true";
                         else
-                            std::cout<<" min_num="<<numerator(minimum.minimum)
-                                     <<" min_den="<<denominator(minimum.minimum)
+                            std::cout<<" min_num="<<minimum.minimum.numerator()
+                                     <<" min_den="<<minimum.minimum.denominator()
                                      <<" threshold=25";
                         std::cout<<"\n";
                     } else {

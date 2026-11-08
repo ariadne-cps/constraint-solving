@@ -809,7 +809,7 @@ The auditor independently minimizes the *actual convex quadratic*
 `(u,v,w,z)=(x0-1/2,x1-1/2,x2-1/2,x3-1/2)` and `Q<=25`.
 It intersects each trace box with `[0,1]^4`, converts the original
 `strtod` binary-double endpoints into arbitrary-precision
-`boost::multiprecision::cpp_rational` values *without rounding*,
+Ariadne `Rational(ExactDouble)` values *without rounding*,
 and checks the stationary interior point, all four edges and their
 corners. On each fixed-u edge the minimizing v is `9u/13`;
 on each fixed-v edge the minimizing u is `36v/73`.
@@ -839,6 +839,8 @@ To also run the benchmark timing after the exact audit, remove
 the interior minimum, an exterior point, the exact threshold,
 an edge minimum, initial-domain disjointness, binary-rational
 reconstruction and a just-outside-threshold value.
+
+**Dependency correction:** the initial C++ version accidentally introduced a Boost Multiprecision header not available in the project. Replaced it with the existing Ariadne `numeric/rational.hpp` and the native exact `Rational(ExactDouble)` conversion. This is an implementation correction, not a change to the mathematical oracle; the full C++ build is still pending.
 
 **Scope:** this proves or refutes separation claims only for the
 specific rotated-ellipsoid geometry and the trace boxes actually
@@ -1057,7 +1059,7 @@ can be added for correctness-only replay.
 | 2026-11-08 | Adaptive dyadic per-box cache validated identical domains versus uncached on all 9,167 queries. Cache saves 107,878 evaluations (19.39%) for budget-8 and 146,144 (12.07%) for resolution; cache-only geomeans 1.124x and 1.107x. Relative to production: 1.016x and 0.662x, with the only major budget win on rotated-ellipsoid still weakening 324/1055 boxes. | Retain benchmark diagnostics, no production change; prioritize independent empty-proof audit and strength-preserving shaving |
 
 | 2026-11-08 | Added a shape-specific independent exact-arithmetic verifier for the 28 candidate-only rotated-ellipsoid empty results. The benchmark now emits candidate-only zero-based query indices; the Python auditor computes the exact convex quadratic minimum on every query box and checks baseline separation bits. | Auditor self-test passed in development; operator replay on actual traces and C++ rebuild pending |
-| 2026-11-08 | Moved the independent rotated-ellipsoid oracle into `benchmark_constraint_reduce.cpp`, using arbitrary-precision rational arithmetic on original binary-double trace endpoints; both adaptive modes and all baseline separation bits are audited before timing. Removed the Python script and added a C++ seven-case self-test mode. | Standalone oracle compiled and passed seven self-test cases; complete Ariadne build and replay on operator traces remain pending |
+| 2026-11-08 | Moved the independent rotated-ellipsoid oracle into `benchmark_constraint_reduce.cpp`, using exact rational arithmetic on original binary-double trace endpoints; both adaptive modes and all baseline separation bits are audited before timing. Removed the Python script and added a C++ seven-case self-test mode. | Full Ariadne build and replay on operator traces remain pending |
 
 ### Update protocol
 
