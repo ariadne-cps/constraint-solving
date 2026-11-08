@@ -1439,12 +1439,17 @@ preserve the original measurements.
 
 ### P6 — Reuse compiled vector hull procedures (benchmark only)
 
-**Status (2026-11-08):** operator build and correctness-only replay
-**passed** for all five d4/f3 paving shapes: 9,167 queries; P1,
-per-query precompiled hull and per-workload prepared hull returned
-representation-exactly identical boxes, matching the frozen full
-scan and exported paving separation bits. Timed measurements are
-**still pending**. No changes to the production solver or its API.
+**Status (2026-11-08):** operator build, correctness-only replay and
+seven-sample timing **passed** for all five d4/f3 paving shapes
+(9,167 queries). P1, per-query and prepared hull returned
+representation-exactly identical boxes matching the frozen
+full scan and exported paving separation bits. Compared with P1,
+Per-query reduced the sum of per-shape medians by **9.1%**;
+Prepared reduced that sum, including the separately calibrated
+one-time compilation estimate, by **13.6%**. Both variants were
+faster than P1 on every measured shape. **No production/API
+change has yet been made**; repeatability, adversarial regressions
+and appropriate prepared-function lifetime remain to verify.
 
 The current production P1 `ConstraintSolver::reduce()`
 calls vector `hull_reduce()` in each contraction round;
@@ -1530,14 +1535,72 @@ cross-round procedure reuse potentially relevant, but these
 counts do **not** measure constructor overhead or runtime savings.
 Certificate reuse and call counts are instrumentation for the
 prepared P1 schedule, not an independent proof of speedup.
-The operator's output expressly reported `Correctness-only replay;
-timing not collected`. Next run the identical five-shape benchmark
-without `--verify-only` and compare per-query, warmed-prepared
-and amortized-prepared timings against P1.
+The initial operator replay expressly reported `Correctness-only
+replay; timing not collected`; the later seven-sample timed run
+below used the same five geometries and reconfirmed the
+representation-exact results. The equivalence checks are distinct
+from the timing results.
 
 **Boundary:** exact equality is established only on these concrete
 replayed boxes; it does not by itself prove equivalence on arbitrary
 functions, precision settings or inputs.
+
+#### P6 seven-sample timing replay — operator results (2026-11-08)
+
+The operator ran `--compare-precompiled-hull --samples 7
+--min-sample-ms 12 --concurrency 0` on all five paving d4/f3
+trace shapes under `$HOME/Downloads/traces/outer`. All five
+`PRECOMPILED_HULL_VERIFIED` rows still report exact equality
+with P1, frozen full scan and trace separation bits.
+
+| Shape | P1 median ms | Per-query median ms | Prepared-hot median ms | One build median ms | Per-query / P1 | Prepared-hot / P1 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| aligned-box | 52.72229 | 41.13988 | 26.62937 | 0.00278 | 1.28154x | 1.97985x |
+| rotated-box | 205.61792 | 178.98775 | 151.43979 | 0.00824 | 1.14878x | 1.35775x |
+| aligned-ellipsoid | 352.07488 | 330.70063 | 318.53329 | 0.00545 | 1.06463x | 1.10530x |
+| rotated-ellipsoid | 611.46692 | 550.23663 | 534.85650 | 0.00831 | 1.11128x | 1.14324x |
+| ball | 431.41737 | 402.56892 | 396.85621 | 0.00586 | 1.07166x | 1.08709x |
+| **Sum of medians** | **1653.29937** | **1503.63379** | **1428.31517** | **0.03064** | **1.09954x** | **1.15752x** |
+
+The **prepared amortized sum-of-medians estimate** is
+1428.34581 ms (1428.31517 + 0.03064), giving **1.15749x**
+speedup against P1. The equal-shape-weight geometric-mean
+speedups are **1.13295x** Per-query, **1.29857x**
+Prepared-hot, and **1.29852x** Prepared-amortized.
+
+In elapsed-time terms, Per-query saves 149.66558 ms
+(**9.05%**) and Prepared-amortized saves 224.95356 ms
+(**13.61%**) relative to the summed P1 shape medians.
+Prepared-amortized adds a further 75.28798 ms reduction
+relative to Per-query (approximately 5.0% of Per-query's
+elapsed time). These are sums of **independently sampled
+medians**, not a paired end-to-end runtime comparison.
+The one-time compile medians are separately calibrated
+and should not be represented as true cold-start cost.
+
+**Interpretation:** this is the first tested P1 performance
+optimization with positive results on **all five** shapes and
+representation-exact output equality on all 9,167 recorded
+queries. Procedure construction/reuse materially affects
+runtime, especially the inexpensive aligned-box geometry.
+The Per-query variant requires no persistent cache or public
+lifetime changes; Prepared is faster but requires an explicit
+prepared-function owner and thread-safe sharing/precision
+policy. The two cannot be combined into one production
+claim without making that ownership choice.
+
+**Decision:** P6 is a promising production candidate,
+not yet production code. Prefer a small, internal Per-query
+P1 change first, preserving a frozen behavioral reference
+and extending regression tests to arbitrary functions,
+different dimensions and precision settings. Once that
+implementation is verified and measured repeatedly,
+evaluate a separate, explicit Prepared API for workloads
+which reuse an unchanged function across many queries;
+do not introduce a silent global cache. Keep the current
+P6 benchmark and its historical production baseline as
+regression controls. Additional timed runs would help
+quantify noise before a performance claim is finalized.
 
 **Compiler diagnosis and correction (2026-11-08):** two attempted
 P6 constructions failed under AppleClang. The original direct
@@ -1555,7 +1618,8 @@ includes `function/procedure.hpp` **before**
 `constraint_solver.hpp` and directly constructs
 `Vector<ValidatedProcedure>(function)` to use that specialization.
 This retains the intended *vector* hull contractor and avoids
-per-output scalar hull replacement. **The later P6 build and correctness-only replay passed; timed performance remains pending.**
+per-output scalar hull replacement. **Both correctness-only
+and seven-sample timed operator replays subsequently passed.**
 
 **Third compile correction (2026-11-08):** once the specialized
 vector constructor compiled, AppleClang identified an unrelated
@@ -1565,17 +1629,19 @@ method-call error in P6's isolated constructor timing: the
 `local.result_size()` from that timing lambda. All member
 calls on `local`, `prepared` and `hull_procedure` inside P6
 were checked against the actual specialization declaration:
-this was the only invalid member call. The subsequent operator build and correctness-only replay completed successfully on all five shapes; runtime measurements remain pending.
+this was the only invalid member call. Subsequent operator
+correctness-only and seven-sample timed replays completed
+successfully on all five shapes.
 
-**Design decision:** even if procedure preparation proves faster,
-cross-query reuse would require an explicitly prepared function
-lifetime/interface and a review of ownership, compilation costs,
-thread safety and precision. Only the per-query variant is
-realizable without such an API. Promotion of either variant is
-contingent on exact replay equality, a repeatable five-shape
-end-to-end improvement and adversarial regression coverage.
-This experiment does *not* claim general correctness based only
-on the fixed replay traces.
+**Design decision:** both P6 variants are empirically faster on
+all five benchmark shapes, while retaining representation-exact
+final boxes. Per-query can be integrated inside P1 without
+persistent ownership. Prepared still needs an explicitly owned
+compiled-function lifetime, attention to thread safety and
+precision, and a separate design decision. Before promotion,
+repeat the timed experiment and run general/adversarial test
+coverage beyond the fixed traces. No current result establishes
+general correctness based only on the replay set.
 
 | 2026-11-08 | Added P6 benchmark-only reuse of precompiled vector hull procedures in P1: production rebuild-per-round vs compile once per query vs prepare once per function across all five d4/f3 paving traces. Exact final-box and exported separation equivalence required against both production and frozen full scan for every query. Numeric-style logging CLI report with per-shape medians, separate compilation median, five-shape geometric mean and workload-weighted totals. | Full C++ build and operator five-shape replay/timings pending; production and API unchanged, per-workload reuse requires explicitly prepared-function ownership. |
 
@@ -1586,6 +1652,8 @@ on the fixed replay traces.
 | 2026-11-08 | Fixed P6's third AppleClang compile failure: a `Vector<ValidatedProcedure>` constructor-timing lambda called nonexistent `local.size()`. The specialized vector has `result_size()`, so it now returns `local.result_size()`. Audited all `local`/`prepared`/`hull_procedure` member calls in P6 against the specialized class declaration; no other invalid calls identified. | Complete build and five-shape verification/timing pending; production unchanged. |
 
 | 2026-11-08 | Operator completed C++ P6 correctness-only replay on all five d4/f3 paving shapes, 9,167 queries using `$HOME/Downloads/traces/outer`: P1 and both procedure-reuse variants matched exactly for every final box, frozen full-scan output and exported separation bit. Totals: 2,258 empty, 26,302 hull rounds, 83,541 box calls. All five `PRECOMPILED_HULL_VERIFIED` rows reported `matched_p1=true matched_legacy=true matched_trace=true`. | Compiler issues closed; no timing results yet. Run seven-sample whole-trace timings including separate prepared-construction cost before considering production changes. |
+
+| 2026-11-08 | Operator P6 7-sample C++ benchmark completed on all five d4/f3 paving shapes (9,167 queries, `$HOME/Downloads/traces/outer`), all final boxes exactly equal to P1/frozen full scan and trace bits. Sum of shape medians P1 1653.29937 ms, Per-query 1503.63379 ms (1.09954x, 9.05% less elapsed), Prepared-hot 1428.31517 ms, separate one-build medians total 0.03064 ms, Prepared-amortized 1428.34581 ms (1.15749x, 13.61% less elapsed). Equal-shape geometric means 1.13295x Per-query and 1.29852x Prepared-amortized; all shapes faster than P1. | Positive P6 result, unlike P1+adaptive hybrid. Prefer controlled Per-query integration as a no-API-change optimization after broader correctness/CI coverage, then separately consider explicitly owned prepared-function reuse; do not introduce implicit global cache. |
 
 ### Update protocol
 
