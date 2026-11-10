@@ -15,8 +15,8 @@ Although independently maintained and usable, this repository is also part of th
 - `include/constraint-solving/`: public `ConstraintSolver`, `ConstraintSolverInterface`, `ConstraintPropagationConstraint` and `ConstraintPropagationStatistics` APIs.
 - `src/`: constraint-solving implementation.
 - `tests/`: C++ regression tests for contraction, propagation, feasibility and validation.
-- `python/bindings/`, `python/tests/`, `python/tutorials/`: Python interface, tests and tutorial.
-- `tutorials/tutorial_constraint_solving/`: standalone installed C++ tutorial.
+- `python/bindings/`, `python/tests/`, `tutorial/`: Python interface, tests and tutorial.
+- `tutorial/`: standalone installed C++ tutorial.
 
 The umbrella header is `ariadne-constraint-solving.hpp`.
 
@@ -43,6 +43,6 @@ cmake --build build-release --parallel --target ariadne-constraint-solving bindi
 cmake --install build-release --prefix /path/to/install
 ```
 
-See `tutorials/tutorial_constraint_solving/tutorial_constraint_solving.cpp` and `python/tutorials/tutorial_constraint_solving.py` for examples of both propagation and feasibility.
+See `tutorial/tutorial_constraint_solving.cpp` and `python/tutorial.py` for examples of both propagation and feasibility.
 
 **Validation semantics:** propagation returns true when inconsistency is proved, even if the closed interval box remains nonempty for strict inequalities. Feasibility results may be indeterminate, and a numerical candidate is not automatically a certified existence witness.

@@ -83,7 +83,7 @@ jobs:
 
       - name: Prepare C++ constraint_solving tutorial
         if: matrix.build_type == 'Release'
-        run: cmake -E copy_directory "$GITHUB_WORKSPACE/tutorials/tutorial_constraint_solving" "${{ runner.workspace }}/tutorial_constraint_solving"
+        run: cmake -E copy_directory "$GITHUB_WORKSPACE/tutorial" "${{ runner.workspace }}/tutorial_constraint_solving"
 
       - name: Build and check C++ constraint_solving tutorial
         if: matrix.build_type == 'Release'
@@ -101,7 +101,7 @@ jobs:
 
       - name: Check installed Python constraint_solving tutorial
         if: matrix.build_type == 'Release'
-        working-directory: ${{ github.workspace }}/python/tutorials
+        working-directory: ${{ github.workspace }}/tutorial
         env:
           PYTHONPATH: ${{ runner.workspace }}/install/lib/python3.13/site-packages
           LD_LIBRARY_PATH: ${{ runner.workspace }}/install/lib
