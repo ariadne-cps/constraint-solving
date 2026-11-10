@@ -22,4 +22,7 @@ endif()
 require_same_dependency_commit(Build CHAINS
     "build" "nonlinear-programming|build")
 
+require_same_dependency_commit(Logging CHAINS
+    "nonlinear-programming|logging" "benchmarking|logging")
+
 ariadne_setup_module(constraint-solving)
