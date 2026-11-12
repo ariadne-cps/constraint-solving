@@ -43,6 +43,8 @@
 #include "foundation/logical.hpp"
 #include "numeric/numeric.hpp"
 #include "function/constraint.hpp"
+// Declares the Vector<Procedure<Y>> specialization used by this interface.
+#include "function/procedure.hpp"
 
 
 namespace Ariadne {
