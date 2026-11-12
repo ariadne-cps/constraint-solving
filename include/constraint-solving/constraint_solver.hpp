@@ -6,24 +6,24 @@
  ****************************************************************************/
 
 /*
- *  This file is part of Ariadne.
+ *  This file is part of Ariadne Constraint Solving.
  *
- *  Ariadne is free software: you can redistribute it and/or modify
+ *  Ariadne Constraint Solving is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
  *  the Free Software Foundation, either version 3 of the License, or
  *  (at your option) any later version.
  *
- *  Ariadne is distributed in the hope that it will be useful,
+ *  Ariadne Constraint Solving is distributed in the hope that it will be useful,
  *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
  *  GNU General Public License for more details.
  *
  *  You should have received a copy of the GNU General Public License
- *  along with Ariadne.  If not, see <https://www.gnu.org/licenses/>.
+ *  along with Ariadne Constraint Solving. If not, see <https://www.gnu.org/licenses/>.
  */
 
-/*! \file constraint-solving/constraint_solver.hpp
- *  \brief Class for solving systems of constraints over a box.
+/** @file constraint-solving/constraint_solver.hpp
+ *  @brief Validated feasibility checks, box contraction, hull propagation, and shaving.
  */
 
 #ifndef ARIADNE_CONSTRAINT_SOLVER_HPP
@@ -47,16 +47,22 @@
 
 namespace Ariadne {
 
+/** @brief Declare the parametric constraint type used by propagation. */
 template<class X, class R> class Constraint;
 
+/** @brief Declare a compiled numerical procedure. */
 template<class X> class Procedure;
 typedef Procedure<ValidatedNumber> ValidatedProcedure;
+/** @brief Declare detailed statistics for procedure-based hull contraction. */
 struct ProcedureHullReductionStatistics;
 
+/** @brief Declare the Taylor model used by validated function patches. */
 template<class P,class F> class TaylorModel;
+/** @brief Declare a scaled vector function patch. */
 template<class M> class VectorScaledFunctionPatch;
 typedef VectorScaledFunctionPatch<TaylorModel<ValidatedTag,FloatDP>> ValidatedVectorMultivariateTaylorFunctionModelDP;
 
+/** @brief Store primal, dual and slack variables for a feasibility iteration. */
 template<class X> struct FeasibilityState {
     X t;
     Vector<X> x;
@@ -127,6 +133,7 @@ class ConstraintSolverInterface {
     //! \brief Try to reduce the size of the domain by propagating interval constraints. Returns \c true if the reduced domain is empty.
     virtual Bool reduce(UpperBoxType& domain, const ValidatedVectorMultivariateFunction& function, const ExactBoxType& codomain) const = 0;
 
+    /** @brief Destroy a constraint solver through its abstract interface. */
     virtual ~ConstraintSolverInterface() = default;
 };
 
@@ -139,13 +146,17 @@ class ConstraintSolverInterface {
 //! temporary domain, containment certificates and numerical scratch space.
 //! No global cache or implicit invalidation policy is used.
 class PreparedConstraintSolverFunction {
+    /** @brief Hold privately owned, precompiled immutable preparation data. */
     struct Data;
     std::shared_ptr<const Data> _data;
     friend class ConstraintSolver;
   public:
+    /** @brief Compile and own a vector function for repeated constraint propagation. */
     explicit PreparedConstraintSolverFunction(
         const ValidatedVectorMultivariateFunction& function);
+    /** @brief Copy the prepared function by sharing its immutable data. */
     PreparedConstraintSolverFunction(const PreparedConstraintSolverFunction&) = default;
+    /** @brief Assign by sharing immutable prepared function data. */
     PreparedConstraintSolverFunction& operator=(const PreparedConstraintSolverFunction&) = default;
 };
 
@@ -203,11 +214,14 @@ class ConstraintSolver
     //! \brief Try to enforce hull consistency by propagating several interval constraints at once.
     //! This method is sharp if each variable occurs at most once in the constraint.
     Bool hull_reduce(UpperBoxType& bx, const ValidatedVectorMultivariateFunction& function, const ExactBoxType& codomain) const;
+    /** @brief Apply hull reduction using already compiled procedures. */
     Bool hull_reduce(UpperBoxType& bx, const Vector<ValidatedProcedure>& procedure, const ExactBoxType& codomain) const;
     //! \brief Try to enforce hull consistency by propagating an interval constraint.
     //! This method is sharp if each variable occurs at most once in the constraint.
     Bool hull_reduce(UpperBoxType& bx, const ValidatedScalarMultivariateFunction& function, const ExactIntervalType& codomain) const;
+    /** @brief Apply a scalar compiled procedure to contract its input box. */
     Bool hull_reduce(UpperBoxType& bx, const ValidatedProcedure& procedure, const ExactIntervalType& codomain) const;
+    /** @brief Apply a compiled procedure and collect detailed hull reduction statistics. */
     Bool hull_reduce(
         UpperBoxType& bx, const ValidatedProcedure& procedure,
         const ExactIntervalType& codomain,
@@ -218,6 +232,7 @@ class ConstraintSolver
     //! Reduces \f$(\lambda\cdot f)(X) \cap (\lambda\cdot C)\f$, evaluating \f$g(x)=g(x^*)+Dg(X) (X-x^*)\f$.
     Bool lyapunov_reduce(UpperBoxType& domain, const ValidatedVectorMultivariateTaylorFunctionModelDP& function, const ExactBoxType& codomain,
                          Vector<FloatDP> centre, Vector<FloatDP> multpliers) const;
+    /** @brief Apply a Taylor-model Lyapunov contraction with the provided center and multipliers. */
     Bool lyapunov_reduce(UpperBoxType& domain, const ValidatedVectorMultivariateTaylorFunctionModelDP& function, const ExactBoxType& codomain,
                          Vector<ApproximateNumericType> centre, Vector<ApproximateNumericType> multpliers) const;
     //! \brief Try to enforce hull consistency by reducing a constraint with respect to one variable.
@@ -228,6 +243,7 @@ class ConstraintSolver
     //! \brief Try to enforce hull consistency by reducing an a monotone dimension.
     //! This method is sharp if each variable occurs at most once in the constraint.
     Bool monotone_reduce(UpperBoxType& bx, const ValidatedScalarMultivariateFunction& function, const ExactIntervalType&, SizeType j) const;
+    /** @brief Apply derivative-assisted contraction along a monotone coordinate. */
     Bool monotone_reduce(UpperBoxType& bx,
                          const ValidatedScalarMultivariateFunction& function,
                          const ValidatedScalarMultivariateFunction& derivative,
@@ -236,15 +252,20 @@ class ConstraintSolver
     //! Split the domain into two pieces to help try to solve the constraints.
     Pair<UpperBoxType,UpperBoxType> split(const UpperBoxType& domain, const ValidatedVectorMultivariateFunction& function, const ExactBoxType& codomain) const;
 
+    /** @brief Contract the box using the given validated constraint. */
     Bool hull_reduce(UpperBoxType& bx, const ValidatedConstraint& constraint) const {
         return this->hull_reduce(bx,constraint.function(),constraint.bounds()); }
+    /** @brief Apply coordinate shaving to the given validated constraint. */
     Bool box_reduce(UpperBoxType& bx, const ValidatedConstraint& constraint, SizeType j) const {
         return this->box_reduce(bx,constraint.function(),constraint.bounds(),j); }
+    /** @brief Apply monotone reduction to the given validated constraint. */
     Bool monotone_reduce(UpperBoxType& bx, const ValidatedConstraint& constraint, SizeType j) const {
         return this->monotone_reduce(bx,constraint.function(),constraint.bounds(),j); }
 
+    /** @brief Destroy the constraint solver. */
     ~ConstraintSolver() override = default;
   private:
+    /** @brief Contract the box using an existing compiled hull procedure. */
     Bool _reduce_with_hull(
         UpperBoxType& domain,
         const ValidatedVectorMultivariateFunction& function,
