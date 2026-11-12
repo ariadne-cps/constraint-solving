@@ -28,18 +28,8 @@
 
 // The Vector<Procedure<Y>> specialization must be visible before
 // constraint_solver.hpp or any use of Vector<ValidatedProcedure>.
-#include "function/procedure.hpp"
-#include "constraint-solving/constraint_solver.hpp"
-#include "function/function.hpp"
-#include "function/constraint.hpp"
-#include "geometry/box.hpp"
-#include "foundation/logical.hpp"
-#include "logging/logging.hpp"
-#include "ariadne-benchmarking.hpp"
-
 #include <algorithm>
 #include <array>
-#include "numeric/rational.hpp"
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
@@ -47,138 +37,147 @@
 #include <iostream>
 #include <iterator>
 #include <limits>
-#include <stdexcept>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "foundation/logical.hpp"
+#include "function/constraint.hpp"
+#include "function/function.hpp"
+#include "function/procedure.hpp"
+#include "geometry/box.hpp"
+#include "logging/logging.hpp"
+#include "numeric/rational.hpp"
+
+#include "ariadne-benchmarking.hpp"
+#include "constraint-solving/constraint_solver.hpp"
+
 using namespace Ariadne;
-namespace Bench=Ariadne::Benchmarking;
+namespace Bench = Ariadne::Benchmarking;
 
 namespace {
 
-constexpr char const* known_shapes[]={
-    "aligned-box","rotated-box","aligned-ellipsoid",
-    "rotated-ellipsoid","ball"
-};
+constexpr const char* known_shapes[] = {
+    "aligned-box", "rotated-box", "aligned-ellipsoid",
+    "rotated-ellipsoid", "ball"};
 
 struct Selection {
     std::vector<std::string> shapes{
-        std::begin(known_shapes),std::end(known_shapes)};
-    unsigned samples=7u;
-    unsigned warmups=0u;
-    unsigned min_sample_ms=12u;
-    unsigned max_iterations=256u;
-    Bool verify_only=false;
-    Bool compare_contained_skip=false;
-    Bool compare_dependency_skip=false;
-    Bool profile_residual_shaving=false;
-    Bool compare_adaptive_shaving=false;
-    Bool compare_adaptive_cache=false;
-    Bool compare_hybrid_shaving=false;
-    Bool compare_precompiled_hull=false;
-    unsigned prepared_batch_size=0u; // 0: unchanged legacy P6 report
-    Bool audit_ellipsoid_self_test=false;
-    Bool audit_resolution_incomparables=false;
-    Bool audit_all_ellipsoid_contractions=false;
-    unsigned adaptive_depth=8u;
-    unsigned adaptive_budget=8u;
-    unsigned adaptive_resolution_budget=64u;
-    double hybrid_width_threshold=3.0;
+        std::begin(known_shapes), std::end(known_shapes)};
+    unsigned samples = 7u;
+    unsigned warmups = 0u;
+    unsigned min_sample_ms = 12u;
+    unsigned max_iterations = 256u;
+    Bool verify_only = false;
+    Bool compare_contained_skip = false;
+    Bool compare_dependency_skip = false;
+    Bool profile_residual_shaving = false;
+    Bool compare_adaptive_shaving = false;
+    Bool compare_adaptive_cache = false;
+    Bool compare_hybrid_shaving = false;
+    Bool compare_precompiled_hull = false;
+    unsigned prepared_batch_size = 0u; // 0: unchanged legacy P6 report
+    Bool audit_ellipsoid_self_test = false;
+    Bool audit_resolution_incomparables = false;
+    Bool audit_all_ellipsoid_contractions = false;
+    unsigned adaptive_depth = 8u;
+    unsigned adaptive_budget = 8u;
+    unsigned adaptive_resolution_budget = 64u;
+    double hybrid_width_threshold = 3.0;
     std::string trace_prefix;
 };
 
-std::vector<std::string> shapes_argument(std::string const& input) {
-    if(input.empty() or input.front()==',' or input.back()==',')
+std::vector<std::string> shapes_argument(const std::string& input) {
+    if (input.empty() or input.front() == ',' or input.back() == ',')
         throw std::invalid_argument("invalid shape list");
     std::vector<std::string> result;
-    std::size_t start=0u;
+    std::size_t start = 0u;
     do {
-        std::size_t end=input.find(',',start);
-        std::string name=input.substr(
-            start,end==std::string::npos?end:end-start);
-        if(std::find(std::begin(known_shapes),std::end(known_shapes),name)
-                ==std::end(known_shapes) or
-           std::find(result.begin(),result.end(),name)!=result.end())
-            throw std::invalid_argument("unknown or duplicate shape: "+name);
+        std::size_t end = input.find(',', start);
+        std::string name = input.substr(
+            start, end == std::string::npos ? end : end - start);
+        if (std::find(std::begin(known_shapes), std::end(known_shapes), name) == std::end(known_shapes) or
+            std::find(result.begin(), result.end(), name) != result.end())
+            throw std::invalid_argument("unknown or duplicate shape: " + name);
         result.push_back(name);
-        if(end==std::string::npos) break;
-        start=end+1u;
-    } while(true);
+        if (end == std::string::npos)
+            break;
+        start = end + 1u;
+    } while (true);
     return result;
 }
 
 List<ArgumentParser> benchmark_argument_parsers(Selection& s) {
     List<ArgumentParser> parsers;
-    auto number=[&](String const& short_id,String const& long_id,
-                    String const& help,unsigned& field,unsigned low,
-                    unsigned high) {
+    auto number = [&](const String& short_id, const String& long_id,
+                      const String& help, unsigned& field, unsigned low,
+                      unsigned high) {
         parsers.append(make_valued_argument_parser(
-            short_id,long_id,help,
-            [&field,low,high](String const& value)->VoidFunction {
-                unsigned const parsed=Bench::parse_unsigned<unsigned>(value);
-                if(parsed<low or parsed>high)
+            short_id, long_id, help,
+            [&field, low, high](const String& value) -> VoidFunction {
+                const unsigned parsed = Bench::parse_unsigned<unsigned>(value);
+                if (parsed < low or parsed > high)
                     throw std::invalid_argument("integer argument out of range");
-                return [&field,parsed] {field=parsed;};
+                return [&field, parsed] { field = parsed; };
             }));
     };
-    auto flag=[&](String const& id,String const& help,Bool& field) {
+    auto flag = [&](const String& id, const String& help, Bool& field) {
         parsers.append(make_unvalued_argument_parser(
-            "",id,help,[&field] {field=true;}));
+            "", id, help, [&field] { field = true; }));
     };
     parsers.append(make_valued_argument_parser(
-        "g","shapes","Comma-separated shapes (default: all five)",
-        [&s](String const& value)->VoidFunction {
-            auto parsed=shapes_argument(std::string(value));
-            return [&s,parsed] {s.shapes=parsed;};
+        "g", "shapes", "Comma-separated shapes (default: all five)",
+        [&s](const String& value) -> VoidFunction {
+            auto parsed = shapes_argument(std::string(value));
+            return [&s, parsed] { s.shapes = parsed; };
         }));
-    number("n","samples","Odd sample count (at least 3)",
-           s.samples,3u,100000u);
-    number("","min-sample-ms","Minimum sample duration in milliseconds",
-           s.min_sample_ms,1u,10000u);
-    number("","max-iterations","Maximum calibrated iterations",
-           s.max_iterations,1u,std::numeric_limits<unsigned>::max());
-    number("","adaptive-depth","Maximum dyadic depth (1..12)",
-           s.adaptive_depth,1u,12u);
-    number("","adaptive-budget","Adaptive evaluation budget (2..4096)",
-           s.adaptive_budget,2u,4096u);
-    number("","adaptive-resolution-budget",
+    number("n", "samples", "Odd sample count (at least 3)",
+           s.samples, 3u, 100000u);
+    number("", "min-sample-ms", "Minimum sample duration in milliseconds",
+           s.min_sample_ms, 1u, 10000u);
+    number("", "max-iterations", "Maximum calibrated iterations",
+           s.max_iterations, 1u, std::numeric_limits<unsigned>::max());
+    number("", "adaptive-depth", "Maximum dyadic depth (1..12)",
+           s.adaptive_depth, 1u, 12u);
+    number("", "adaptive-budget", "Adaptive evaluation budget (2..4096)",
+           s.adaptive_budget, 2u, 4096u);
+    number("", "adaptive-resolution-budget",
            "Resolution evaluation budget (2..4096)",
-           s.adaptive_resolution_budget,2u,4096u);
-    number("","prepared-batch-size",
+           s.adaptive_resolution_budget, 2u, 4096u);
+    number("", "prepared-batch-size",
            "Benchmark only: reconstruct vector hull procedures every N queries",
-           s.prepared_batch_size,1u,100000u);
+           s.prepared_batch_size, 1u, 100000u);
     parsers.append(make_valued_argument_parser(
-        "","trace-prefix","Prefix of exported d4/f3 paving trace files",
-        [&s](String const& value)->VoidFunction {
-            if(value.empty())
+        "", "trace-prefix", "Prefix of exported d4/f3 paving trace files",
+        [&s](const String& value) -> VoidFunction {
+            if (value.empty())
                 throw std::invalid_argument("trace prefix must not be empty");
-            std::string const prefix(value);
-            return [&s,prefix] {s.trace_prefix=prefix;};
+            const std::string prefix(value);
+            return [&s, prefix] { s.trace_prefix = prefix; };
         }));
     parsers.append(make_valued_argument_parser(
-        "","hybrid-width-threshold",
+        "", "hybrid-width-threshold",
         "Threshold for sum of four retained widths, in [0,4] (default 3)",
-        [&s](String const& value)->VoidFunction {
-            std::string const token(value);
-            std::size_t used=0u;
-            double const parsed=std::stod(token,&used);
-            if(used!=token.size() or not std::isfinite(parsed)
-               or parsed<0.0 or parsed>4.0)
+        [&s](const String& value) -> VoidFunction {
+            const std::string token(value);
+            std::size_t used = 0u;
+            const double parsed = std::stod(token, &used);
+            if (used != token.size() or not std::isfinite(parsed) or parsed < 0.0 or parsed > 4.0)
                 throw std::invalid_argument("width threshold must be in [0,4]");
-            return [&s,parsed] {s.hybrid_width_threshold=parsed;};
+            return [&s, parsed] { s.hybrid_width_threshold = parsed; };
         }));
-    flag("verify-only","Validate without collecting timings",s.verify_only);
-    flag("compare-contained-skip","Compare P1 against legacy full scan",
+    flag("verify-only", "Validate without collecting timings", s.verify_only);
+    flag("compare-contained-skip", "Compare P1 against legacy full scan",
          s.compare_contained_skip);
-    flag("compare-dependency-skip","Compare static dependency pruning",
+    flag("compare-dependency-skip", "Compare static dependency pruning",
          s.compare_dependency_skip);
-    flag("profile-residual-shaving","Profile P1 residual box calls",
+    flag("profile-residual-shaving", "Profile P1 residual box calls",
          s.profile_residual_shaving);
-    flag("compare-adaptive-shaving","Compare adaptive boundary shaving",
+    flag("compare-adaptive-shaving", "Compare adaptive boundary shaving",
          s.compare_adaptive_shaving);
-    flag("compare-adaptive-cache","Compare cached adaptive shaving",
+    flag("compare-adaptive-cache", "Compare cached adaptive shaving",
          s.compare_adaptive_cache);
     flag("compare-hybrid-shaving",
          "Compare P1, P1+resolution and width-gated P1+resolution",
@@ -186,7 +185,7 @@ List<ArgumentParser> benchmark_argument_parsers(Selection& s) {
     flag("compare-precompiled-hull",
          "Compare P1 with per-query and per-workload cached vector hull procedures",
          s.compare_precompiled_hull);
-    flag("audit-ellipsoid-self-test","Self-test exact rational oracle",
+    flag("audit-ellipsoid-self-test", "Self-test exact rational oracle",
          s.audit_ellipsoid_self_test);
     flag("audit-resolution-incomparables",
          "Audit incomparable rotated-ellipsoid cases exactly",
@@ -197,47 +196,46 @@ List<ArgumentParser> benchmark_argument_parsers(Selection& s) {
     return parsers;
 }
 
-List<EffectiveConstraint> shape_constraints(std::string const& shape) {
-    auto x=EffectiveScalarMultivariateFunction::coordinates(4u);
-    auto first=x[0]-0.5_x;
-    auto second=x[1]-0.5_x;
-    auto rotated_first=3*first+4*second;
-    auto rotated_second=-4*first+3*second;
+List<EffectiveConstraint> shape_constraints(const std::string& shape) {
+    auto x = EffectiveScalarMultivariateFunction::coordinates(4u);
+    auto first = x[0] - 0.5_x;
+    auto second = x[1] - 0.5_x;
+    auto rotated_first = 3 * first + 4 * second;
+    auto rotated_second = -4 * first + 3 * second;
     List<EffectiveConstraint> result;
 
-    if(shape=="aligned-box") {
-        result.append(first>=-0.25_x);
-        result.append(first<=0.25_x);
-        result.append(second>=-0.125_x);
-        result.append(second<=0.125_x);
-    } else if(shape=="rotated-box") {
-        result.append(rotated_first>=-1.25_x);
-        result.append(rotated_first<=1.25_x);
-        result.append(rotated_second>=-0.625_x);
-        result.append(rotated_second<=0.625_x);
+    if (shape == "aligned-box") {
+        result.append(first >= -0.25_x);
+        result.append(first <= 0.25_x);
+        result.append(second >= -0.125_x);
+        result.append(second <= 0.125_x);
+    } else if (shape == "rotated-box") {
+        result.append(rotated_first >= -1.25_x);
+        result.append(rotated_first <= 1.25_x);
+        result.append(rotated_second >= -0.625_x);
+        result.append(rotated_second <= 0.625_x);
     } else {
-        EffectiveScalarMultivariateFunction quadratic=
-            first*first*16+second*second*16;
-        if(shape=="aligned-ellipsoid") {
-            quadratic=first*first*16+second*second*64;
-        } else if(shape=="rotated-ellipsoid") {
-            quadratic=rotated_first*rotated_first*16
-                +rotated_second*rotated_second*64;
-        } else if(shape!="ball") {
+        EffectiveScalarMultivariateFunction quadratic =
+            first * first * 16 + second * second * 16;
+        if (shape == "aligned-ellipsoid") {
+            quadratic = first * first * 16 + second * second * 64;
+        } else if (shape == "rotated-ellipsoid") {
+            quadratic = rotated_first * rotated_first * 16 + rotated_second * rotated_second * 64;
+        } else if (shape != "ball") {
             throw std::invalid_argument("unknown geometry");
         }
-        for(unsigned i=2u;i<4u;++i) {
-            auto centered=x[i]-0.5_x;
-            quadratic=quadratic+centered*centered*
-                (shape=="rotated-ellipsoid"?400:16);
+        for (unsigned i = 2u; i < 4u; ++i) {
+            auto centered = x[i] - 0.5_x;
+            quadratic = quadratic + centered * centered *
+                                        (shape == "rotated-ellipsoid" ? 400 : 16);
         }
         result.append(
-            quadratic<=(shape=="rotated-ellipsoid"?25.0_x:1.0_x));
+            quadratic <= (shape == "rotated-ellipsoid" ? 25.0_x : 1.0_x));
     }
-    if(shape=="aligned-box" or shape=="rotated-box") {
-        for(unsigned i=2u;i<4u;++i) {
-            result.append(x[i]>=0.25_x);
-            result.append(x[i]<=0.75_x);
+    if (shape == "aligned-box" or shape == "rotated-box") {
+        for (unsigned i = 2u; i < 4u; ++i) {
+            result.append(x[i] >= 0.25_x);
+            result.append(x[i] <= 0.75_x);
         }
     }
     return result;
@@ -254,107 +252,107 @@ struct SolverProblem {
 
 // Fixed, reproducible dyadic boxes. These are NOT the adaptive candidate
 // cells from paving; any conclusion applies first to this input sample.
-SolverProblem make_problem(std::string const& shape) {
-    List<EffectiveConstraint> constraints=shape_constraints(shape);
-    auto x=EffectiveScalarMultivariateFunction::coordinates(4u);
+SolverProblem make_problem(const std::string& shape) {
+    List<EffectiveConstraint> constraints = shape_constraints(shape);
+    auto x = EffectiveScalarMultivariateFunction::coordinates(4u);
     EffectiveVectorMultivariateFunction effective(
-        4u+constraints.size(),EuclideanDomain(4u));
-    for(SizeType i=0u;i<4u;++i) effective[i]=x[i];
-    for(SizeType i=0u;i<constraints.size();++i)
-        effective[i+4u]=constraints[i].function();
+        4u + constraints.size(), EuclideanDomain(4u));
+    for (SizeType i = 0u; i < 4u; ++i)
+        effective[i] = x[i];
+    for (SizeType i = 0u; i < constraints.size(); ++i)
+        effective[i + 4u] = constraints[i].function();
     // The public ConstrainedImageSet::separated() passes this effective
     // vector to reduce(), whose parameter is a validated vector.
-    ValidatedVectorMultivariateFunction function=effective;
+    ValidatedVectorMultivariateFunction function = effective;
 
-    ExactIntervalType intervals[]={
-        ExactIntervalType(0.0_x,0.25_x),
-        ExactIntervalType(0.25_x,0.5_x),
-        ExactIntervalType(0.5_x,0.75_x),
-        ExactIntervalType(0.75_x,1.0_x)
-    };
+    ExactIntervalType intervals[] = {
+        ExactIntervalType(0.0_x, 0.25_x),
+        ExactIntervalType(0.25_x, 0.5_x),
+        ExactIntervalType(0.5_x, 0.75_x),
+        ExactIntervalType(0.75_x, 1.0_x)};
     std::vector<ExactBoxType> codomains;
     codomains.reserve(32u);
-    auto append=[&](ExactBoxType const& box) {
-        ExactBoxType codomain(4u+constraints.size());
-        for(SizeType i=0u;i<4u;++i) codomain[i]=box[i];
-        for(SizeType i=0u;i<constraints.size();++i)
-            codomain[4u+i]=constraints[i].bounds();
+    auto append = [&](const ExactBoxType& box) {
+        ExactBoxType codomain(4u + constraints.size());
+        for (SizeType i = 0u; i < 4u; ++i)
+            codomain[i] = box[i];
+        for (SizeType i = 0u; i < constraints.size(); ++i)
+            codomain[4u + i] = constraints[i].bounds();
         codomains.push_back(std::move(codomain));
     };
-    for(unsigned i=0u;i<4u;++i) {
-        for(unsigned j=0u;j<4u;++j) {
-            append(ExactBoxType({
-                intervals[i],intervals[j],
-                intervals[(i+j)%4u],intervals[(i+2u*j)%4u]}));
-            append(ExactBoxType({
-                intervals[i],intervals[j],
-                ExactIntervalType(0.25_x,0.75_x),
-                ExactIntervalType(0.25_x,0.75_x)}));
+    for (unsigned i = 0u; i < 4u; ++i) {
+        for (unsigned j = 0u; j < 4u; ++j) {
+            append(ExactBoxType({intervals[i], intervals[j],
+                                 intervals[(i + j) % 4u], intervals[(i + 2u * j) % 4u]}));
+            append(ExactBoxType({intervals[i], intervals[j],
+                                 ExactIntervalType(0.25_x, 0.75_x),
+                                 ExactIntervalType(0.25_x, 0.75_x)}));
         }
     }
-    UpperBoxType initial=ExactBoxType({
-        {0.0_x,1.0_x},{0.0_x,1.0_x},
-        {0.0_x,1.0_x},{0.0_x,1.0_x}});
-    return {std::move(function),std::move(initial),
-            std::move(codomains),constraints.size()};
+    UpperBoxType initial = ExactBoxType({
+        {0.0_x, 1.0_x},
+        {0.0_x, 1.0_x},
+        {0.0_x, 1.0_x},
+        {0.0_x, 1.0_x}
+    });
+    return {std::move(function), std::move(initial),
+            std::move(codomains), constraints.size()};
 }
-
 
 struct TraceRecord {
     ExactBoxType box;
     Bool separated;
     // Preserve the exact binary doubles read with strtod for an independent
     // arbitrary-precision rational geometry audit.
-    std::array<std::pair<double,double>,4u> endpoints;
+    std::array<std::pair<double, double>, 4u> endpoints;
 };
 
 std::vector<TraceRecord> read_adaptive_trace(
-        std::string const& prefix,std::string const& shape) {
-    std::string path=prefix+"-"+shape+"-d4-f3.trace";
+    const std::string& prefix, const std::string& shape) {
+    std::string path = prefix + "-" + shape + "-d4-f3.trace";
     std::ifstream in(path);
-    if(not in) throw std::runtime_error("cannot open paving trace: "+path);
-    std::string header,recorded_shape;
-    unsigned dimension=0u,fineness=0u;
-    SizeType count=0u;
-    if(not (in>>header>>recorded_shape>>dimension>>fineness>>count)
-       or header!="ARIADNE_PAVING_SOLVER_TRACE_V1"
-       or recorded_shape!=shape or dimension!=4u or fineness!=3u
-       or count==0u or count>1000000u) {
-        throw std::runtime_error("invalid paving trace header: "+path);
+    if (not in)
+        throw std::runtime_error("cannot open paving trace: " + path);
+    std::string header, recorded_shape;
+    unsigned dimension = 0u, fineness = 0u;
+    SizeType count = 0u;
+    if (not(in >> header >> recorded_shape >> dimension >> fineness >> count) or header != "ARIADNE_PAVING_SOLVER_TRACE_V1" or recorded_shape != shape or dimension != 4u or fineness != 3u or count == 0u or count > 1000000u) {
+        throw std::runtime_error("invalid paving trace header: " + path);
     }
     std::vector<TraceRecord> result;
     result.reserve(count);
-    auto parse_number=[](std::string const& token)->double {
-        if(token.empty()) throw std::runtime_error("empty trace endpoint");
-        char* end=nullptr;
-        double value=std::strtod(token.c_str(),&end);
-        if(end==token.c_str() or *end!='\0' or not std::isfinite(value))
-            throw std::runtime_error("invalid trace endpoint: "+token);
+    auto parse_number = [](const std::string& token) -> double {
+        if (token.empty())
+            throw std::runtime_error("empty trace endpoint");
+        char* end = nullptr;
+        double value = std::strtod(token.c_str(), &end);
+        if (end == token.c_str() or *end != '\0' or not std::isfinite(value))
+            throw std::runtime_error("invalid trace endpoint: " + token);
         return value;
     };
     // Parse strings with strtod; standard iostream floating input does not
     // reliably accept C99 hexadecimal-float notation across platforms.
-    for(SizeType i=0u;i<count;++i) {
-        unsigned separated=0u;
-        if(not (in>>separated) or separated>1u)
-            throw std::runtime_error("invalid trace separation bit at query "
-                                    +std::to_string(i));
+    for (SizeType i = 0u; i < count; ++i) {
+        unsigned separated = 0u;
+        if (not(in >> separated) or separated > 1u)
+            throw std::runtime_error("invalid trace separation bit at query " + std::to_string(i));
         ExactBoxType box(4u);
-        std::array<std::pair<double,double>,4u> endpoints;
-        for(SizeType j=0u;j<4u;++j) {
-            std::string lower,upper;
-            if(not (in>>lower>>upper))
+        std::array<std::pair<double, double>, 4u> endpoints;
+        for (SizeType j = 0u; j < 4u; ++j) {
+            std::string lower, upper;
+            if (not(in >> lower >> upper))
                 throw std::runtime_error("truncated paving trace");
-            double l=parse_number(lower);
-            double u=parse_number(upper);
-            if(l>u) throw std::runtime_error("reversed trace interval");
-            endpoints[j]={l,u};
-            box[j]=ExactIntervalType(ExactDouble(l),ExactDouble(u));
+            double l = parse_number(lower);
+            double u = parse_number(upper);
+            if (l > u)
+                throw std::runtime_error("reversed trace interval");
+            endpoints[j] = {l, u};
+            box[j] = ExactIntervalType(ExactDouble(l), ExactDouble(u));
         }
-        result.push_back({std::move(box),separated!=0u,endpoints});
+        result.push_back({std::move(box), separated != 0u, endpoints});
     }
     std::string trailing;
-    if(in>>trailing)
+    if (in >> trailing)
         throw std::runtime_error("unexpected trailing trace payload");
     return result;
 }
@@ -363,84 +361,86 @@ std::vector<TraceRecord> read_adaptive_trace(
 // Arbitrary-precision rationals represent the original trace binary doubles
 // exactly. This is not a general contractor-soundness proof.
 using ExactRational = Rational;
-using BinaryBox = std::array<std::pair<double,double>,4u>;
+using BinaryBox = std::array<std::pair<double, double>, 4u>;
 
 ExactRational binary_double_as_rational(double value) {
-    if(not std::isfinite(value))
+    if (not std::isfinite(value))
         throw std::runtime_error("nonfinite ellipsoid trace endpoint");
     // Ariadne's Rational(ExactDouble) reconstructs the *exact* IEEE-754
     // binary fraction. No external arithmetic package is needed.
     return Rational(ExactDouble(value));
 }
 
-ExactRational rational_clamp(ExactRational const& value,
-                             ExactRational const& lower,
-                             ExactRational const& upper) {
-    return std::min(upper,std::max(lower,value));
+ExactRational rational_clamp(const ExactRational& value,
+                             const ExactRational& lower,
+                             const ExactRational& upper) {
+    return std::min(upper, std::max(lower, value));
 }
 
-ExactRational rotated_ellipsoid_q(ExactRational const& u,
-                                  ExactRational const& v,
-                                  ExactRational const& w,
-                                  ExactRational const& z) {
-    ExactRational first=3*u+4*v;
-    ExactRational second=-4*u+3*v;
-    return 16*first*first+64*second*second+400*(w*w+z*z);
+ExactRational rotated_ellipsoid_q(const ExactRational& u,
+                                  const ExactRational& v,
+                                  const ExactRational& w,
+                                  const ExactRational& z) {
+    ExactRational first = 3 * u + 4 * v;
+    ExactRational second = -4 * u + 3 * v;
+    return 16 * first * first + 64 * second * second + 400 * (w * w + z * z);
 }
 
 struct ExactEllipsoidMinimum {
-    bool intersects_initial_domain=false;
-    ExactRational minimum=0;
-    std::array<ExactRational,4u> witness{};
+    bool intersects_initial_domain = false;
+    ExactRational minimum = 0;
+    std::array<ExactRational, 4u> witness{};
 
     bool empty() const {
-        return not intersects_initial_domain or minimum>25;
+        return not intersects_initial_domain or minimum > 25;
     }
 };
 
-ExactEllipsoidMinimum exact_rotated_ellipsoid_minimum(BinaryBox const& box) {
-    ExactRational const zero=0;
-    ExactRational const one=1;
-    ExactRational const half=ExactRational(1)/2;
-    std::array<std::pair<ExactRational,ExactRational>,4u> domain;
-    for(std::size_t i=0u;i<4u;++i) {
-        domain[i]={std::max(zero,binary_double_as_rational(box[i].first)),
-                   std::min(one,binary_double_as_rational(box[i].second))};
-        if(domain[i].first>domain[i].second) return {};
+ExactEllipsoidMinimum exact_rotated_ellipsoid_minimum(const BinaryBox& box) {
+    const ExactRational zero = 0;
+    const ExactRational one = 1;
+    const ExactRational half = ExactRational(1) / 2;
+    std::array<std::pair<ExactRational, ExactRational>, 4u> domain;
+    for (std::size_t i = 0u; i < 4u; ++i) {
+        domain[i] = {std::max(zero, binary_double_as_rational(box[i].first)),
+                     std::min(one, binary_double_as_rational(box[i].second))};
+        if (domain[i].first > domain[i].second)
+            return {};
     }
-    ExactRational const ul=domain[0].first-half;
-    ExactRational const uu=domain[0].second-half;
-    ExactRational const vl=domain[1].first-half;
-    ExactRational const vu=domain[1].second-half;
-    ExactRational const w=
-        rational_clamp(half,domain[2].first,domain[2].second)-half;
-    ExactRational const z=
-        rational_clamp(half,domain[3].first,domain[3].second)-half;
+    const ExactRational ul = domain[0].first - half;
+    const ExactRational uu = domain[0].second - half;
+    const ExactRational vl = domain[1].first - half;
+    const ExactRational vu = domain[1].second - half;
+    const ExactRational w =
+        rational_clamp(half, domain[2].first, domain[2].second) - half;
+    const ExactRational z =
+        rational_clamp(half, domain[3].first, domain[3].second) - half;
     ExactEllipsoidMinimum result;
-    auto consider=[&](ExactRational const& u,ExactRational const& v) {
-        ExactRational q=rotated_ellipsoid_q(u,v,w,z);
-        if(not result.intersects_initial_domain or q<result.minimum) {
-            result.intersects_initial_domain=true;
-            result.minimum=std::move(q);
-            result.witness={u+half,v+half,w+half,z+half};
+    auto consider = [&](const ExactRational& u, const ExactRational& v) {
+        ExactRational q = rotated_ellipsoid_q(u, v, w, z);
+        if (not result.intersects_initial_domain or q < result.minimum) {
+            result.intersects_initial_domain = true;
+            result.minimum = std::move(q);
+            result.witness = {u + half, v + half, w + half, z + half};
         }
     };
     // Q's u,v Hessian [[2336,-1152],[-1152,1664]] is positive definite.
     // The rectangle minimum occurs at (0,0), on an edge, or at a corner.
-    if(ul<=zero and zero<=uu and vl<=zero and zero<=vu)
-        consider(zero,zero);
-    for(ExactRational const& u:{ul,uu})
-        consider(u,rational_clamp(ExactRational(9)*u/13,vl,vu));
-    for(ExactRational const& v:{vl,vu})
-        consider(rational_clamp(ExactRational(36)*v/73,ul,uu),v);
-    for(ExactRational const& u:{ul,uu})
-        for(ExactRational const& v:{vl,vu}) consider(u,v);
+    if (ul <= zero and zero <= uu and vl <= zero and zero <= vu)
+        consider(zero, zero);
+    for (const ExactRational& u: {ul, uu})
+        consider(u, rational_clamp(ExactRational(9) * u / 13, vl, vu));
+    for (const ExactRational& v: {vl, vu})
+        consider(rational_clamp(ExactRational(36) * v / 73, ul, uu), v);
+    for (const ExactRational& u: {ul, uu})
+        for (const ExactRational& v: {vl, vu})
+            consider(u, v);
     return result;
 }
 
-std::string exact_witness_string(std::array<ExactRational,4u> const& point) {
+std::string exact_witness_string(const std::array<ExactRational, 4u>& point) {
     std::ostringstream out;
-    out<<"("<<point[0]<<","<<point[1]<<","<<point[2]<<","<<point[3]<<")";
+    out << "(" << point[0] << "," << point[1] << "," << point[2] << "," << point[3] << ")";
     return out.str();
 }
 
@@ -451,107 +451,109 @@ std::string exact_witness_string(std::array<ExactRational,4u> const& point) {
 // if Qmin<25 and the open slab has positive extent. A minimizer on the
 // retained boundary with Qmin==25 is NOT a counterexample.
 ExactRational rotated_ellipsoid_point_q(
-        std::array<ExactRational,4u> const& point) {
-    ExactRational const half=ExactRational(1)/2;
+    const std::array<ExactRational, 4u>& point) {
+    const ExactRational half = ExactRational(1) / 2;
     return rotated_ellipsoid_q(
-        point[0]-half,point[1]-half,point[2]-half,point[3]-half);
+        point[0] - half, point[1] - half, point[2] - half, point[3] - half);
 }
 
 struct ExactContractionAudit {
-    SizeType cut_faces=0u;
-    SizeType lost_faces=0u;
-    std::size_t witness_coordinate=0u;
-    bool witness_below=false;
-    ExactRational witness_q=0;
-    std::array<ExactRational,4u> witness{};
+    SizeType cut_faces = 0u;
+    SizeType lost_faces = 0u;
+    std::size_t witness_coordinate = 0u;
+    bool witness_below = false;
+    ExactRational witness_q = 0;
+    std::array<ExactRational, 4u> witness{};
 };
 
 ExactContractionAudit audit_exact_ellipsoid_contraction(
-        BinaryBox const& query,BinaryBox const& retained) {
+    const BinaryBox& query, const BinaryBox& retained) {
     ExactContractionAudit result;
-    ExactRational const zero=0;
-    ExactRational const one=1;
-    std::array<std::pair<ExactRational,ExactRational>,4u> domain;
-    for(std::size_t j=0u;j<4u;++j) {
-        if(not std::isfinite(retained[j].first)
-           or not std::isfinite(retained[j].second)
-           or retained[j].first>retained[j].second)
+    const ExactRational zero = 0;
+    const ExactRational one = 1;
+    std::array<std::pair<ExactRational, ExactRational>, 4u> domain;
+    for (std::size_t j = 0u; j < 4u; ++j) {
+        if (not std::isfinite(retained[j].first) or not std::isfinite(retained[j].second) or retained[j].first > retained[j].second)
             throw std::runtime_error(
                 "exact contraction audit requires a nonempty finite box");
-        domain[j]={
-            std::max(zero,binary_double_as_rational(query[j].first)),
-            std::min(one,binary_double_as_rational(query[j].second))};
-        if(domain[j].first>domain[j].second) return result;
+        domain[j] = {
+            std::max(zero, binary_double_as_rational(query[j].first)),
+            std::min(one, binary_double_as_rational(query[j].second))};
+        if (domain[j].first > domain[j].second)
+            return result;
     }
 
-    auto check_side=[&](std::size_t coordinate,bool below,double bound) {
-        BinaryBox slab=query;
-        if(below) slab[coordinate].second=std::min(
-            slab[coordinate].second,bound);
-        else slab[coordinate].first=std::max(
-            slab[coordinate].first,bound);
+    auto check_side = [&](std::size_t coordinate, bool below, double bound) {
+        BinaryBox slab = query;
+        if (below)
+            slab[coordinate].second = std::min(
+                slab[coordinate].second, bound);
+        else
+            slab[coordinate].first = std::max(
+                slab[coordinate].first, bound);
         ++result.cut_faces;
-        ExactEllipsoidMinimum minimum=exact_rotated_ellipsoid_minimum(slab);
-        if(minimum.empty()) return;
+        ExactEllipsoidMinimum minimum = exact_rotated_ellipsoid_minimum(slab);
+        if (minimum.empty())
+            return;
 
-        ExactRational const cut=binary_double_as_rational(bound);
-        auto point=minimum.witness;
-        auto strictly_outside=[&](ExactRational const& x) {
-            return below ? x<cut : x>cut;
+        const ExactRational cut = binary_double_as_rational(bound);
+        auto point = minimum.witness;
+        auto strictly_outside = [&](const ExactRational& x) {
+            return below ? x < cut : x > cut;
         };
-        if(not strictly_outside(point[coordinate])) {
-            if(minimum.minimum==25) return;
+        if (not strictly_outside(point[coordinate])) {
+            if (minimum.minimum == 25)
+                return;
             // Since Qmin<25, convexity provides an explicit rational
             // feasible witness on the open side. Mix with the far side
             // of the queried domain and use the convex upper bound:
             // Q((1-t)*minimizer+t*other) <= (1-t)*Qmin+t*Qother.
-            auto other=point;
-            other[coordinate]=below
-                ? domain[coordinate].first : domain[coordinate].second;
-            if(not strictly_outside(other[coordinate]))
+            auto other = point;
+            other[coordinate] = below
+                                  ? domain[coordinate].first
+                                  : domain[coordinate].second;
+            if (not strictly_outside(other[coordinate]))
                 throw std::runtime_error("zero-width excluded open slab");
-            ExactRational const q_other=rotated_ellipsoid_point_q(other);
-            ExactRational const t=q_other<=25 ? ExactRational(1)
-                : (ExactRational(25)-minimum.minimum)
-                  /(2*(q_other-minimum.minimum));
-            point[coordinate]+=
-                t*(other[coordinate]-point[coordinate]);
+            const ExactRational q_other = rotated_ellipsoid_point_q(other);
+            const ExactRational t = q_other <= 25 ? ExactRational(1)
+                                                  : (ExactRational(25) - minimum.minimum) / (2 * (q_other - minimum.minimum));
+            point[coordinate] +=
+                t * (other[coordinate] - point[coordinate]);
         }
-        if(not strictly_outside(point[coordinate])
-           or rotated_ellipsoid_point_q(point)>25)
+        if (not strictly_outside(point[coordinate]) or rotated_ellipsoid_point_q(point) > 25)
             throw std::runtime_error(
                 "invalid constructed rational exclusion counterexample");
-        for(std::size_t j=0u;j<4u;++j)
-            if(point[j]<domain[j].first or point[j]>domain[j].second)
+        for (std::size_t j = 0u; j < 4u; ++j)
+            if (point[j] < domain[j].first or point[j] > domain[j].second)
                 throw std::runtime_error(
                     "exclusion counterexample outside query domain");
         ++result.lost_faces;
-        if(result.lost_faces==1u) {
-            result.witness_coordinate=coordinate;
-            result.witness_below=below;
-            result.witness_q=rotated_ellipsoid_point_q(point);
-            result.witness=std::move(point);
+        if (result.lost_faces == 1u) {
+            result.witness_coordinate = coordinate;
+            result.witness_below = below;
+            result.witness_q = rotated_ellipsoid_point_q(point);
+            result.witness = std::move(point);
         }
     };
 
-    for(std::size_t j=0u;j<4u;++j) {
-        ExactRational const lower=
+    for (std::size_t j = 0u; j < 4u; ++j) {
+        const ExactRational lower =
             binary_double_as_rational(retained[j].first);
-        ExactRational const upper=
+        const ExactRational upper =
             binary_double_as_rational(retained[j].second);
-        if(domain[j].first<lower)
-            check_side(j,true,retained[j].first);
-        if(domain[j].second>upper)
-            check_side(j,false,retained[j].second);
+        if (domain[j].first < lower)
+            check_side(j, true, retained[j].first);
+        if (domain[j].second > upper)
+            check_side(j, false, retained[j].second);
     }
     return result;
 }
 
-BinaryBox exact_audit_box_endpoints(UpperBoxType const& domain) {
+BinaryBox exact_audit_box_endpoints(const UpperBoxType& domain) {
     BinaryBox result{};
-    for(std::size_t j=0u;j<4u;++j)
-        result[j]={domain[j].lower_bound().get_d(),
-                   domain[j].upper_bound().get_d()};
+    for (std::size_t j = 0u; j < 4u; ++j)
+        result[j] = {domain[j].lower_bound().get_d(),
+                     domain[j].upper_bound().get_d()};
     return result;
 }
 
@@ -563,595 +565,611 @@ BinaryBox exact_audit_box_endpoints(UpperBoxType const& domain) {
 // The excluded subset of a query is the union of the eight open exterior
 // half-slabs; the exact quadratic oracle detects any feasible point there.
 struct CompleteContractionAuditStatistics {
-    SizeType queries=0u;
-    SizeType empty_geometry=0u;
-    SizeType feasible_geometry=0u;
-    SizeType empty_result_on_empty_geometry=0u;
-    SizeType nonempty_result_on_empty_geometry=0u;
-    SizeType nonempty_result_on_feasible_geometry=0u;
-    SizeType empty_result_on_feasible_geometry=0u;
-    SizeType cut_faces_checked=0u;
-    SizeType lost_faces=0u;
-    SizeType lost_cases=0u;
+    SizeType queries = 0u;
+    SizeType empty_geometry = 0u;
+    SizeType feasible_geometry = 0u;
+    SizeType empty_result_on_empty_geometry = 0u;
+    SizeType nonempty_result_on_empty_geometry = 0u;
+    SizeType nonempty_result_on_feasible_geometry = 0u;
+    SizeType empty_result_on_feasible_geometry = 0u;
+    SizeType cut_faces_checked = 0u;
+    SizeType lost_faces = 0u;
+    SizeType lost_cases = 0u;
 };
 
 void audit_all_exact_ellipsoid_contraction(
-        SizeType query_index,char const* contractor,
-        TraceRecord const& trace,ExactEllipsoidMinimum const& geometry,
-        UpperBoxType const& result_box,
-        CompleteContractionAuditStatistics& stats) {
+    SizeType query_index, const char* contractor,
+    const TraceRecord& trace, const ExactEllipsoidMinimum& geometry,
+    const UpperBoxType& result_box,
+    CompleteContractionAuditStatistics& stats) {
     ++stats.queries;
-    bool const result_empty=definitely(result_box.is_empty());
-    if(geometry.empty()) {
+    const bool result_empty = definitely(result_box.is_empty());
+    if (geometry.empty()) {
         ++stats.empty_geometry;
-        if(result_empty) ++stats.empty_result_on_empty_geometry;
-        else ++stats.nonempty_result_on_empty_geometry;
+        if (result_empty)
+            ++stats.empty_result_on_empty_geometry;
+        else
+            ++stats.nonempty_result_on_empty_geometry;
         return; // Every contraction is sound when the query is infeasible.
     }
 
     ++stats.feasible_geometry;
-    if(result_empty) {
+    if (result_empty) {
         ++stats.empty_result_on_feasible_geometry;
         ++stats.lost_cases;
-        std::cout<<"AUDIT_ALL_ELLIPSOID_COUNTEREXAMPLE contractor="<<contractor
-                 <<" query="<<query_index
-                 <<" reason=EMPTY_CONTRACTION_OF_FEASIBLE_QUERY"
-                 <<" feasible_Q="<<geometry.minimum
-                 <<" feasible_point="<<exact_witness_string(geometry.witness)
-                 <<"\n";
+        std::cout << "AUDIT_ALL_ELLIPSOID_COUNTEREXAMPLE contractor=" << contractor
+                  << " query=" << query_index
+                  << " reason=EMPTY_CONTRACTION_OF_FEASIBLE_QUERY"
+                  << " feasible_Q=" << geometry.minimum
+                  << " feasible_point=" << exact_witness_string(geometry.witness)
+                  << "\n";
         return;
     }
 
     ++stats.nonempty_result_on_feasible_geometry;
-    ExactContractionAudit const cut=audit_exact_ellipsoid_contraction(
-        trace.endpoints,exact_audit_box_endpoints(result_box));
-    stats.cut_faces_checked+=cut.cut_faces;
-    stats.lost_faces+=cut.lost_faces;
-    if(cut.lost_faces!=0u) {
+    const ExactContractionAudit cut = audit_exact_ellipsoid_contraction(
+        trace.endpoints, exact_audit_box_endpoints(result_box));
+    stats.cut_faces_checked += cut.cut_faces;
+    stats.lost_faces += cut.lost_faces;
+    if (cut.lost_faces != 0u) {
         ++stats.lost_cases;
-        std::cout<<"AUDIT_ALL_ELLIPSOID_COUNTEREXAMPLE contractor="<<contractor
-                 <<" query="<<query_index
-                 <<" reason=EXCLUDED_FEASIBLE_POINT"
-                 <<" coordinate="<<cut.witness_coordinate
-                 <<" side="<<(cut.witness_below?"below":"above")
-                 <<" feasible_Q="<<cut.witness_q
-                 <<" feasible_point="<<exact_witness_string(cut.witness)
-                 <<" lost_faces="<<cut.lost_faces<<"\n";
+        std::cout << "AUDIT_ALL_ELLIPSOID_COUNTEREXAMPLE contractor=" << contractor
+                  << " query=" << query_index
+                  << " reason=EXCLUDED_FEASIBLE_POINT"
+                  << " coordinate=" << cut.witness_coordinate
+                  << " side=" << (cut.witness_below ? "below" : "above")
+                  << " feasible_Q=" << cut.witness_q
+                  << " feasible_point=" << exact_witness_string(cut.witness)
+                  << " lost_faces=" << cut.lost_faces << "\n";
     }
 }
 
 struct IncomparableAuditStatistics {
-    SizeType cases=0u;
-    SizeType empty_geometry=0u;
-    SizeType feasible_geometry=0u;
-    SizeType empty_box_cases=0u;
-    SizeType nonempty_incomparable=0u;
-    SizeType production_empty_cases=0u;
-    SizeType candidate_empty_cases=0u;
-    SizeType both_sound=0u;
-    SizeType production_loss_cases=0u;
-    SizeType candidate_loss_cases=0u;
-    SizeType cut_faces_checked=0u;
+    SizeType cases = 0u;
+    SizeType empty_geometry = 0u;
+    SizeType feasible_geometry = 0u;
+    SizeType empty_box_cases = 0u;
+    SizeType nonempty_incomparable = 0u;
+    SizeType production_empty_cases = 0u;
+    SizeType candidate_empty_cases = 0u;
+    SizeType both_sound = 0u;
+    SizeType production_loss_cases = 0u;
+    SizeType candidate_loss_cases = 0u;
+    SizeType cut_faces_checked = 0u;
 };
 
 bool exact_contraction_is_sound(bool box_empty,
-                                ExactEllipsoidMinimum const& geometry,
-                                ExactContractionAudit const& cut_audit) {
+                                const ExactEllipsoidMinimum& geometry,
+                                const ExactContractionAudit& cut_audit) {
     return geometry.empty() or
-        (not box_empty and cut_audit.lost_faces==0u);
+           (not box_empty and cut_audit.lost_faces == 0u);
 }
 
 void audit_resolution_incomparable_case(
-        SizeType query_index,TraceRecord const& trace,
-        ExactEllipsoidMinimum const& geometry,
-        UpperBoxType const& production,UpperBoxType const& candidate,
-        IncomparableAuditStatistics& stats) {
+    SizeType query_index, const TraceRecord& trace,
+    const ExactEllipsoidMinimum& geometry,
+    const UpperBoxType& production, const UpperBoxType& candidate,
+    IncomparableAuditStatistics& stats) {
     ++stats.cases;
-    bool const production_empty=definitely(production.is_empty());
-    bool const candidate_empty=definitely(candidate.is_empty());
-    stats.production_empty_cases+=static_cast<SizeType>(production_empty);
-    stats.candidate_empty_cases+=static_cast<SizeType>(candidate_empty);
-    bool const any_empty=production_empty or candidate_empty;
-    stats.empty_box_cases+=static_cast<SizeType>(any_empty);
-    stats.nonempty_incomparable+=static_cast<SizeType>(not any_empty);
+    const bool production_empty = definitely(production.is_empty());
+    const bool candidate_empty = definitely(candidate.is_empty());
+    stats.production_empty_cases += static_cast<SizeType>(production_empty);
+    stats.candidate_empty_cases += static_cast<SizeType>(candidate_empty);
+    const bool any_empty = production_empty or candidate_empty;
+    stats.empty_box_cases += static_cast<SizeType>(any_empty);
+    stats.nonempty_incomparable += static_cast<SizeType>(not any_empty);
 
     // Never decode endpoints from an empty box. The surviving
     // coordinates of a reversed-interval representation are irrelevant
     // to the empty set and have no semantic "tighter face" meaning.
     BinaryBox p{};
     BinaryBox c{};
-    SizeType candidate_tighter=0u;
-    SizeType production_tighter=0u;
-    if(not any_empty) {
-        p=exact_audit_box_endpoints(production);
-        c=exact_audit_box_endpoints(candidate);
-        for(std::size_t j=0u;j<4u;++j) {
-            candidate_tighter+=static_cast<SizeType>(c[j].first>p[j].first);
-            candidate_tighter+=static_cast<SizeType>(c[j].second<p[j].second);
-            production_tighter+=static_cast<SizeType>(p[j].first>c[j].first);
-            production_tighter+=static_cast<SizeType>(p[j].second<c[j].second);
-            if(p[j]!=c[j]) {
+    SizeType candidate_tighter = 0u;
+    SizeType production_tighter = 0u;
+    if (not any_empty) {
+        p = exact_audit_box_endpoints(production);
+        c = exact_audit_box_endpoints(candidate);
+        for (std::size_t j = 0u; j < 4u; ++j) {
+            candidate_tighter += static_cast<SizeType>(c[j].first > p[j].first);
+            candidate_tighter += static_cast<SizeType>(c[j].second < p[j].second);
+            production_tighter += static_cast<SizeType>(p[j].first > c[j].first);
+            production_tighter += static_cast<SizeType>(p[j].second < c[j].second);
+            if (p[j] != c[j]) {
                 std::ostringstream line;
-                line<<std::hexfloat
-                    <<"AUDIT_INCOMPARABLE_FACE method=resolution query="
-                    <<query_index
-                    <<" coordinate="<<j
-                    <<" production=["<<p[j].first<<","<<p[j].second<<"]"
-                    <<" candidate=["<<c[j].first<<","<<c[j].second<<"]";
-                std::cout<<line.str()<<"\n";
+                line << std::hexfloat
+                     << "AUDIT_INCOMPARABLE_FACE method=resolution query="
+                     << query_index
+                     << " coordinate=" << j
+                     << " production=[" << p[j].first << "," << p[j].second << "]"
+                     << " candidate=[" << c[j].first << "," << c[j].second << "]";
+                std::cout << line.str() << "\n";
             }
         }
     }
 
-    std::cout<<"AUDIT_INCOMPARABLE_QUERY method=resolution query="<<query_index
-             <<" production_box="<<(production_empty?"EMPTY":"NONEMPTY")
-             <<" candidate_box="<<(candidate_empty?"EMPTY":"NONEMPTY")
-             <<" candidate_tighter_faces="<<candidate_tighter
-             <<" production_tighter_faces="<<production_tighter;
-    if(geometry.empty()) {
+    std::cout << "AUDIT_INCOMPARABLE_QUERY method=resolution query=" << query_index
+              << " production_box=" << (production_empty ? "EMPTY" : "NONEMPTY")
+              << " candidate_box=" << (candidate_empty ? "EMPTY" : "NONEMPTY")
+              << " candidate_tighter_faces=" << candidate_tighter
+              << " production_tighter_faces=" << production_tighter;
+    if (geometry.empty()) {
         ++stats.empty_geometry;
-        std::cout<<" geometry=EXACTLY_EMPTY"
-                    " production=VACUOUS candidate=VACUOUS\n";
+        std::cout << " geometry=EXACTLY_EMPTY"
+                     " production=VACUOUS candidate=VACUOUS\n";
         return;
     }
 
     ++stats.feasible_geometry;
-    if(not production_empty) p=exact_audit_box_endpoints(production);
-    if(not candidate_empty) c=exact_audit_box_endpoints(candidate);
+    if (not production_empty)
+        p = exact_audit_box_endpoints(production);
+    if (not candidate_empty)
+        c = exact_audit_box_endpoints(candidate);
     ExactContractionAudit pa;
     ExactContractionAudit ca;
-    if(not production_empty)
-        pa=audit_exact_ellipsoid_contraction(trace.endpoints,p);
-    if(not candidate_empty)
-        ca=audit_exact_ellipsoid_contraction(trace.endpoints,c);
-    stats.cut_faces_checked+=pa.cut_faces+ca.cut_faces;
-    bool const production_ok=
-        exact_contraction_is_sound(production_empty,geometry,pa);
-    bool const candidate_ok=
-        exact_contraction_is_sound(candidate_empty,geometry,ca);
-    stats.production_loss_cases+=static_cast<SizeType>(not production_ok);
-    stats.candidate_loss_cases+=static_cast<SizeType>(not candidate_ok);
-    stats.both_sound+=static_cast<SizeType>(production_ok and candidate_ok);
-    std::cout<<" geometry=FEASIBLE"
-             <<" production="<<(production_ok?"SOUND":"LOST_FEASIBLE_POINT")
-             <<" candidate="<<(candidate_ok?"SOUND":"LOST_FEASIBLE_POINT")
-             <<" production_cut_faces="<<pa.cut_faces
-             <<" candidate_cut_faces="<<ca.cut_faces
-             <<" production_lost_faces="<<pa.lost_faces
-             <<" candidate_lost_faces="<<ca.lost_faces<<"\n";
-    auto print_loss=[&](char const* contractor,bool box_empty,
-                        ExactContractionAudit const& a) {
-        if(box_empty) {
+    if (not production_empty)
+        pa = audit_exact_ellipsoid_contraction(trace.endpoints, p);
+    if (not candidate_empty)
+        ca = audit_exact_ellipsoid_contraction(trace.endpoints, c);
+    stats.cut_faces_checked += pa.cut_faces + ca.cut_faces;
+    const bool production_ok =
+        exact_contraction_is_sound(production_empty, geometry, pa);
+    const bool candidate_ok =
+        exact_contraction_is_sound(candidate_empty, geometry, ca);
+    stats.production_loss_cases += static_cast<SizeType>(not production_ok);
+    stats.candidate_loss_cases += static_cast<SizeType>(not candidate_ok);
+    stats.both_sound += static_cast<SizeType>(production_ok and candidate_ok);
+    std::cout << " geometry=FEASIBLE"
+              << " production=" << (production_ok ? "SOUND" : "LOST_FEASIBLE_POINT")
+              << " candidate=" << (candidate_ok ? "SOUND" : "LOST_FEASIBLE_POINT")
+              << " production_cut_faces=" << pa.cut_faces
+              << " candidate_cut_faces=" << ca.cut_faces
+              << " production_lost_faces=" << pa.lost_faces
+              << " candidate_lost_faces=" << ca.lost_faces << "\n";
+    auto print_loss = [&](const char* contractor, bool box_empty,
+                          const ExactContractionAudit& a) {
+        if (box_empty) {
             // geometry.witness is an exact feasible point in the query.
-            std::cout<<"AUDIT_INCOMPARABLE_COUNTEREXAMPLE method=resolution"
-                     <<" query="<<query_index
-                     <<" contractor="<<contractor
-                     <<" reason=EMPTY_CONTRACTION_OF_FEASIBLE_GEOMETRY"
-                     <<" feasible_Q="<<geometry.minimum
-                     <<" feasible_point="<<exact_witness_string(geometry.witness)
-                     <<"\n";
+            std::cout << "AUDIT_INCOMPARABLE_COUNTEREXAMPLE method=resolution"
+                      << " query=" << query_index
+                      << " contractor=" << contractor
+                      << " reason=EMPTY_CONTRACTION_OF_FEASIBLE_GEOMETRY"
+                      << " feasible_Q=" << geometry.minimum
+                      << " feasible_point=" << exact_witness_string(geometry.witness)
+                      << "\n";
             return;
         }
-        if(a.lost_faces==0u) return;
-        std::cout<<"AUDIT_INCOMPARABLE_COUNTEREXAMPLE method=resolution"
-                 <<" query="<<query_index
-                 <<" contractor="<<contractor
-                 <<" coordinate="<<a.witness_coordinate
-                 <<" side="<<(a.witness_below?"below":"above")
-                 <<" feasible_Q="<<a.witness_q
-                 <<" feasible_point="<<exact_witness_string(a.witness)
-                 <<"\n";
+        if (a.lost_faces == 0u)
+            return;
+        std::cout << "AUDIT_INCOMPARABLE_COUNTEREXAMPLE method=resolution"
+                  << " query=" << query_index
+                  << " contractor=" << contractor
+                  << " coordinate=" << a.witness_coordinate
+                  << " side=" << (a.witness_below ? "below" : "above")
+                  << " feasible_Q=" << a.witness_q
+                  << " feasible_point=" << exact_witness_string(a.witness)
+                  << "\n";
     };
-    if(not production_ok) print_loss("production",production_empty,pa);
-    if(not candidate_ok) print_loss("candidate",candidate_empty,ca);
+    if (not production_ok)
+        print_loss("production", production_empty, pa);
+    if (not candidate_ok)
+        print_loss("candidate", candidate_empty, ca);
 }
 
 void audit_rotated_ellipsoid_self_test() {
-    auto point=[](double value) {return std::make_pair(value,value);};
-    BinaryBox full{{{0,1},{0,1},{0,1},{0,1}}};
-    auto minimum=exact_rotated_ellipsoid_minimum(full);
-    std::array<ExactRational,4u> const centre{{
-        ExactRational(1)/2,ExactRational(1)/2,
-        ExactRational(1)/2,ExactRational(1)/2}};
-    if(minimum.empty() or minimum.minimum!=0 or minimum.witness!=centre)
+    auto point = [](double value) { return std::make_pair(value, value); };
+    BinaryBox full{
+        {{0, 1}, {0, 1}, {0, 1}, {0, 1}}
+    };
+    auto minimum = exact_rotated_ellipsoid_minimum(full);
+    const std::array<ExactRational, 4u> centre{
+        {ExactRational(1) / 2, ExactRational(1) / 2,
+         ExactRational(1) / 2, ExactRational(1) / 2}
+    };
+    if (minimum.empty() or minimum.minimum != 0 or minimum.witness != centre)
         throw std::runtime_error("ellipsoid audit self-test: full domain");
-    BinaryBox far{{point(1),point(1),point(0.5),point(0.5)}};
-    if(exact_rotated_ellipsoid_minimum(far).minimum!=212)
+    BinaryBox far{
+        {point(1), point(1), point(0.5), point(0.5)}
+    };
+    if (exact_rotated_ellipsoid_minimum(far).minimum != 212)
         throw std::runtime_error("ellipsoid audit self-test: outside");
-    BinaryBox boundary{{point(0.5),point(0.5),point(0.75),point(0.5)}};
-    minimum=exact_rotated_ellipsoid_minimum(boundary);
-    if(minimum.minimum!=25 or minimum.empty())
+    BinaryBox boundary{
+        {point(0.5), point(0.5), point(0.75), point(0.5)}
+    };
+    minimum = exact_rotated_ellipsoid_minimum(boundary);
+    if (minimum.minimum != 25 or minimum.empty())
         throw std::runtime_error("ellipsoid audit self-test: boundary");
-    BinaryBox edge{{point(1),{0,1},point(0.5),point(0.5)}};
-    minimum=exact_rotated_ellipsoid_minimum(edge);
-    if(minimum.witness[1]!=ExactRational(11)/13
-       or minimum.minimum!=rotated_ellipsoid_q(
-           ExactRational(1)/2,ExactRational(9)/26,0,0))
+    BinaryBox edge{
+        {point(1), {0, 1}, point(0.5), point(0.5)}
+    };
+    minimum = exact_rotated_ellipsoid_minimum(edge);
+    if (minimum.witness[1] != ExactRational(11) / 13 or minimum.minimum != rotated_ellipsoid_q(
+                                                                               ExactRational(1) / 2, ExactRational(9) / 26, 0, 0))
         throw std::runtime_error("ellipsoid audit self-test: edge");
-    BinaryBox disjoint{{point(2),point(0.5),point(0.5),point(0.5)}};
-    if(exact_rotated_ellipsoid_minimum(disjoint).intersects_initial_domain)
+    BinaryBox disjoint{
+        {point(2), point(0.5), point(0.5), point(0.5)}
+    };
+    if (exact_rotated_ellipsoid_minimum(disjoint).intersects_initial_domain)
         throw std::runtime_error("ellipsoid audit self-test: disjoint");
-    if(binary_double_as_rational(0.1)!=
-       ExactRational(3602879701896397LL)/36028797018963968LL)
+    if (binary_double_as_rational(0.1) !=
+        ExactRational(3602879701896397LL) / 36028797018963968LL)
         throw std::runtime_error("ellipsoid audit self-test: binary fraction");
-    boundary[2]=point(std::nextafter(0.75,1.0));
-    if(not exact_rotated_ellipsoid_minimum(boundary).empty())
+    boundary[2] = point(std::nextafter(0.75, 1.0));
+    if (not exact_rotated_ellipsoid_minimum(boundary).empty())
         throw std::runtime_error("ellipsoid audit self-test: strict boundary");
     // An endpoint at Q=25 may be retained without losing feasibility;
     // moving it by one binary ulp must yield a strict feasible witness.
-    BinaryBox safe=full;
-    safe[2]={0.25,0.75};
-    if(audit_exact_ellipsoid_contraction(full,safe).lost_faces!=0u)
+    BinaryBox safe = full;
+    safe[2] = {0.25, 0.75};
+    if (audit_exact_ellipsoid_contraction(full, safe).lost_faces != 0u)
         throw std::runtime_error("ellipsoid audit self-test: tangent face");
-    BinaryBox unsound=full;
-    unsound[2].first=std::nextafter(0.25,1.0);
-    auto cut=audit_exact_ellipsoid_contraction(full,unsound);
-    if(cut.lost_faces==0u or cut.witness[2]>=
-       binary_double_as_rational(unsound[2].first)
-       or cut.witness_q>25)
+    BinaryBox unsound = full;
+    unsound[2].first = std::nextafter(0.25, 1.0);
+    auto cut = audit_exact_ellipsoid_contraction(full, unsound);
+    if (cut.lost_faces == 0u or cut.witness[2] >= binary_double_as_rational(unsound[2].first) or cut.witness_q > 25)
         throw std::runtime_error("ellipsoid audit self-test: strict loss");
-    BinaryBox safe_other=full;
-    safe_other[2].first=std::nextafter(0.25,0.0);
-    if(audit_exact_ellipsoid_contraction(full,safe_other).lost_faces!=0u)
+    BinaryBox safe_other = full;
+    safe_other[2].first = std::nextafter(0.25, 0.0);
+    if (audit_exact_ellipsoid_contraction(full, safe_other).lost_faces != 0u)
         throw std::runtime_error("ellipsoid audit self-test: safe near face");
-    BinaryBox unsound_other=full;
-    unsound_other[0].first=0.5;
-    cut=audit_exact_ellipsoid_contraction(full,unsound_other);
-    if(cut.lost_faces==0u or cut.witness_q>25 or cut.witness[0]>=
-       ExactRational(1)/2)
+    BinaryBox unsound_other = full;
+    unsound_other[0].first = 0.5;
+    cut = audit_exact_ellipsoid_contraction(full, unsound_other);
+    if (cut.lost_faces == 0u or cut.witness_q > 25 or cut.witness[0] >= ExactRational(1) / 2)
         throw std::runtime_error("ellipsoid audit self-test: coordinate loss");
-    BinaryBox tangent_query=full;
-    tangent_query[2]={0.25,0.25};
-    BinaryBox missed_tangent=full;
-    missed_tangent[2].first=0.5;
-    cut=audit_exact_ellipsoid_contraction(tangent_query,missed_tangent);
-    if(cut.lost_faces==0u or cut.witness_q!=25
-       or cut.witness[2]!=ExactRational(1)/4)
+    BinaryBox tangent_query = full;
+    tangent_query[2] = {0.25, 0.25};
+    BinaryBox missed_tangent = full;
+    missed_tangent[2].first = 0.5;
+    cut = audit_exact_ellipsoid_contraction(tangent_query, missed_tangent);
+    if (cut.lost_faces == 0u or cut.witness_q != 25 or cut.witness[2] != ExactRational(1) / 4)
         throw std::runtime_error(
             "ellipsoid audit self-test: strict outside tangent");
     // Empty contracted domains are sound only for empty geometries,
     // irrespective of the reversed-interval representation.
-    ExactContractionAudit const uncut;
-    if(exact_contraction_is_sound(true,
-           exact_rotated_ellipsoid_minimum(full),uncut)
-       or not exact_contraction_is_sound(true,
-           exact_rotated_ellipsoid_minimum(far),uncut)
-       or not exact_contraction_is_sound(false,
-           exact_rotated_ellipsoid_minimum(full),uncut))
+    const ExactContractionAudit uncut;
+    if (exact_contraction_is_sound(true,
+                                   exact_rotated_ellipsoid_minimum(full), uncut) or
+        not exact_contraction_is_sound(true,
+                                       exact_rotated_ellipsoid_minimum(far), uncut) or
+        not exact_contraction_is_sound(false,
+                                       exact_rotated_ellipsoid_minimum(full), uncut))
         throw std::runtime_error(
             "ellipsoid audit self-test: empty contraction semantics");
-    std::cout<<"AUDIT_ELLIPSOID_SELF_TEST_OK cases=15\n";
+    std::cout << "AUDIT_ELLIPSOID_SELF_TEST_OK cases=15\n";
 }
 
 struct EllipsoidAuditStatistics {
-    SizeType true_empty=0u;
-    SizeType baseline_false_positive=0u;
-    std::array<SizeType,2u> reported{{0u,0u}};
-    std::array<SizeType,2u> proved_empty{{0u,0u}};
-    std::array<SizeType,2u> false_positive{{0u,0u}};
+    SizeType true_empty = 0u;
+    SizeType baseline_false_positive = 0u;
+    std::array<SizeType, 2u> reported{
+        {0u, 0u}
+    };
+    std::array<SizeType, 2u> proved_empty{
+        {0u, 0u}
+    };
+    std::array<SizeType, 2u> false_positive{
+        {0u, 0u}
+    };
 };
 
 // A call is "changed" when its targeted interval differs from the input,
 // including certified emptiness. Unchanged calls are not necessarily
 // redundant: they may still be required to establish a validated result.
 struct BoxCallStatistics {
-    SizeType calls=0u;
-    SizeType evaluations=0u;
-    SizeType changed=0u;
-    SizeType unchanged=0u;
-    SizeType emptied=0u;
-    SizeType zero_evaluations=0u;
-    double seconds=0.0;
+    SizeType calls = 0u;
+    SizeType evaluations = 0u;
+    SizeType changed = 0u;
+    SizeType unchanged = 0u;
+    SizeType emptied = 0u;
+    SizeType zero_evaluations = 0u;
+    double seconds = 0.0;
 
-    void add(SizeType n,Bool modified,Bool empty,double duration) {
+    void add(SizeType n, Bool modified, Bool empty, double duration) {
         ++calls;
-        evaluations+=n;
-        changed+=static_cast<SizeType>(modified);
-        unchanged+=static_cast<SizeType>(not modified);
-        emptied+=static_cast<SizeType>(empty);
-        zero_evaluations+=static_cast<SizeType>(n==0u);
-        seconds+=duration;
+        evaluations += n;
+        changed += static_cast<SizeType>(modified);
+        unchanged += static_cast<SizeType>(not modified);
+        emptied += static_cast<SizeType>(empty);
+        zero_evaluations += static_cast<SizeType>(n == 0u);
+        seconds += duration;
     }
 };
 
 struct ReduceTraceStatistics {
-    SizeType queries=0u;
-    SizeType proven_empty=0u;
-    SizeType rounds=0u;
-    SizeType hull_calls=0u;
-    SizeType box_calls=0u;
-    SizeType stopped_empty_hull=0u;
-    SizeType stopped_empty_box=0u;
-    SizeType stopped_threshold=0u;
-    double hull_seconds=0.0;
-    double box_seconds=0.0;
-    double total_seconds=0.0;
+    SizeType queries = 0u;
+    SizeType proven_empty = 0u;
+    SizeType rounds = 0u;
+    SizeType hull_calls = 0u;
+    SizeType box_calls = 0u;
+    SizeType stopped_empty_hull = 0u;
+    SizeType stopped_empty_box = 0u;
+    SizeType stopped_threshold = 0u;
+    double hull_seconds = 0.0;
+    double box_seconds = 0.0;
+    double total_seconds = 0.0;
 
     BoxCallStatistics box_activity;
     std::vector<BoxCallStatistics> by_output;
     std::vector<BoxCallStatistics> by_variable;
     std::vector<BoxCallStatistics> by_pair;
 
-    void prepare(SizeType outputs,SizeType variables) {
+    void prepare(SizeType outputs, SizeType variables) {
         by_output.resize(outputs);
         by_variable.resize(variables);
-        by_pair.resize(outputs*variables);
+        by_pair.resize(outputs * variables);
     }
-    void record_box(SizeType output,SizeType variable,SizeType count,
-                    SizeType evaluations,Bool changed,Bool empty,
+    void record_box(SizeType output, SizeType variable, SizeType count,
+                    SizeType evaluations, Bool changed, Bool empty,
                     double elapsed_seconds) {
-        box_activity.add(evaluations,changed,empty,elapsed_seconds);
+        box_activity.add(evaluations, changed, empty, elapsed_seconds);
         by_output[output].add(
-            evaluations,changed,empty,elapsed_seconds);
+            evaluations, changed, empty, elapsed_seconds);
         by_variable[variable].add(
-            evaluations,changed,empty,elapsed_seconds);
-        by_pair[output*count+variable].add(
-            evaluations,changed,empty,elapsed_seconds);
+            evaluations, changed, empty, elapsed_seconds);
+        by_pair[output * count + variable].add(
+            evaluations, changed, empty, elapsed_seconds);
     }
 };
 
 // Frozen pre-containment full-scan reducer. Benchmark-only reference:
 // the production reducer must not be used for this baseline.
-Bool reduce_full_scan_reference(ConstraintSolver const& solver,
+Bool reduce_full_scan_reference(const ConstraintSolver& solver,
                                 UpperBoxType& domain,
-                                ValidatedVectorMultivariateFunction const& function,
-                                ExactBoxType const& codomain) {
-    const ExactDouble MINIMUM_REDUCTION=0.75_x;
-    if(definitely(domain.is_empty())) return true;
-    FloatDPUpperBound magnitude={0u,dp};
-    for(SizeType j=0u;j<domain.size();++j)
-        magnitude+=domain[j].width();
-    FloatDPUpperBound previous=magnitude;
+                                const ValidatedVectorMultivariateFunction& function,
+                                const ExactBoxType& codomain) {
+    const ExactDouble MINIMUM_REDUCTION = 0.75_x;
+    if (definitely(domain.is_empty()))
+        return true;
+    FloatDPUpperBound magnitude = {0u, dp};
+    for (SizeType j = 0u; j < domain.size(); ++j)
+        magnitude += domain[j].width();
+    FloatDPUpperBound previous = magnitude;
     do {
-        solver.hull_reduce(domain,function,codomain);
-        if(definitely(domain.is_empty())) return true;
-        for(SizeType i=0u;i<codomain.size();++i) {
-            for(SizeType j=0u;j<domain.size();++j) {
-                solver.box_reduce(domain,function[i],codomain[i],j);
-                if(definitely(domain.is_empty())) return true;
+        solver.hull_reduce(domain, function, codomain);
+        if (definitely(domain.is_empty()))
+            return true;
+        for (SizeType i = 0u; i < codomain.size(); ++i) {
+            for (SizeType j = 0u; j < domain.size(); ++j) {
+                solver.box_reduce(domain, function[i], codomain[i], j);
+                if (definitely(domain.is_empty()))
+                    return true;
             }
         }
-        previous=magnitude;
-        magnitude=0u;
-        for(SizeType j=0u;j<domain.size();++j)
-            magnitude+=domain[j].width();
-    } while(magnitude.raw()
-            < mul(near,previous.raw(),FloatDP(MINIMUM_REDUCTION,dp)));
+        previous = magnitude;
+        magnitude = 0u;
+        for (SizeType j = 0u; j < domain.size(); ++j)
+            magnitude += domain[j].width();
+    } while (magnitude.raw() < mul(near, previous.raw(), FloatDP(MINIMUM_REDUCTION, dp)));
     return false;
 }
 
-void traced_reduce(ConstraintSolver const& solver,UpperBoxType& domain,
-                   ValidatedVectorMultivariateFunction const& function,
-                   ExactBoxType const& codomain,ReduceTraceStatistics& stats) {
-    using Clock=Bench::Clock;
-    auto elapsed=[](Clock::time_point started)->double {
-        return Bench::elapsed_ns(started,Clock::now())/1e9;
+void traced_reduce(const ConstraintSolver& solver, UpperBoxType& domain,
+                   const ValidatedVectorMultivariateFunction& function,
+                   const ExactBoxType& codomain, ReduceTraceStatistics& stats) {
+    using Clock = Bench::Clock;
+    auto elapsed = [](Clock::time_point started) -> double {
+        return Bench::elapsed_ns(started, Clock::now()) / 1e9;
     };
     ++stats.queries;
-    auto start=Clock::now();
-    const ExactDouble MINIMUM_REDUCTION=0.75_x;
-    if(definitely(domain.is_empty())) {
+    auto start = Clock::now();
+    const ExactDouble MINIMUM_REDUCTION = 0.75_x;
+    if (definitely(domain.is_empty())) {
         ++stats.proven_empty;
-        stats.total_seconds+=elapsed(start);
+        stats.total_seconds += elapsed(start);
         return;
     }
-    FloatDPUpperBound magnitude={0u,dp};
-    for(SizeType j=0u;j<domain.size();++j)
-        magnitude+=domain[j].width();
-    FloatDPUpperBound previous=magnitude;
+    FloatDPUpperBound magnitude = {0u, dp};
+    for (SizeType j = 0u; j < domain.size(); ++j)
+        magnitude += domain[j].width();
+    FloatDPUpperBound previous = magnitude;
     do {
         ++stats.rounds;
-        auto hstart=Clock::now();
+        auto hstart = Clock::now();
         ++stats.hull_calls;
-        solver.hull_reduce(domain,function,codomain);
-        stats.hull_seconds+=elapsed(hstart);
-        if(definitely(domain.is_empty())) {
+        solver.hull_reduce(domain, function, codomain);
+        stats.hull_seconds += elapsed(hstart);
+        if (definitely(domain.is_empty())) {
             ++stats.stopped_empty_hull;
             ++stats.proven_empty;
-            stats.total_seconds+=elapsed(start);
+            stats.total_seconds += elapsed(start);
             return;
         }
-        for(SizeType i=0u;i<codomain.size();++i) {
-            for(SizeType j=0u;j<domain.size();++j) {
+        for (SizeType i = 0u; i < codomain.size(); ++i) {
+            for (SizeType j = 0u; j < domain.size(); ++j) {
                 // Use the solver's existing evaluation-count overload.
                 // Its numerical algorithm is identical to the four-argument
                 // overload used by production reduce().
-                UpperIntervalType before=domain[j];
-                SizeType function_evaluations=0u;
-                auto bstart=Clock::now();
+                UpperIntervalType before = domain[j];
+                SizeType function_evaluations = 0u;
+                auto bstart = Clock::now();
                 ++stats.box_calls;
                 solver.box_reduce(
-                    domain,function[i],codomain[i],j,function_evaluations);
-                double seconds=elapsed(bstart);
-                stats.box_seconds+=seconds;
-                Bool empty=definitely(domain.is_empty());
+                    domain, function[i], codomain[i], j, function_evaluations);
+                double seconds = elapsed(bstart);
+                stats.box_seconds += seconds;
+                Bool empty = definitely(domain.is_empty());
                 stats.record_box(
-                    i,j,domain.size(),function_evaluations,
-                    not same(before,domain[j]),empty,seconds);
-                if(empty) {
+                    i, j, domain.size(), function_evaluations,
+                    not same(before, domain[j]), empty, seconds);
+                if (empty) {
                     ++stats.stopped_empty_box;
                     ++stats.proven_empty;
-                    stats.total_seconds+=elapsed(start);
+                    stats.total_seconds += elapsed(start);
                     return;
                 }
             }
         }
-        previous=magnitude;
-        magnitude=0u;
-        for(SizeType j=0u;j<domain.size();++j)
-            magnitude+=domain[j].width();
-    } while(magnitude.raw()
-            < mul(near,previous.raw(),FloatDP(MINIMUM_REDUCTION,dp)));
+        previous = magnitude;
+        magnitude = 0u;
+        for (SizeType j = 0u; j < domain.size(); ++j)
+            magnitude += domain[j].width();
+    } while (magnitude.raw() < mul(near, previous.raw(), FloatDP(MINIMUM_REDUCTION, dp)));
     ++stats.stopped_threshold;
-    stats.total_seconds+=elapsed(start);
+    stats.total_seconds += elapsed(start);
 }
 
-void profile_adaptive_trace(std::string const& prefix,
-                            std::string const& shape,Bool verify_only) {
-    SolverProblem problem=make_problem(shape);
-    std::vector<TraceRecord> records=read_adaptive_trace(prefix,shape);
+void profile_adaptive_trace(const std::string& prefix,
+                            const std::string& shape, Bool verify_only) {
+    SolverProblem problem = make_problem(shape);
+    std::vector<TraceRecord> records = read_adaptive_trace(prefix, shape);
     ConstraintSolver solver;
     ReduceTraceStatistics stats;
-    stats.prepare(problem.function.result_size(),problem.initial_domain.size());
-    SizeType mismatch=0u;
-    auto sweep_start=Bench::Clock::now();
-    for(TraceRecord const& entry:records) {
+    stats.prepare(problem.function.result_size(), problem.initial_domain.size());
+    SizeType mismatch = 0u;
+    auto sweep_start = Bench::Clock::now();
+    for (const TraceRecord& entry: records) {
         // Reuse exactly the geometry and constraints from this shape; only
         // the query-box portion varies with the exported adaptive trace.
-        ExactBoxType codomain=problem.codomains.front();
-        for(SizeType i=0u;i<4u;++i)
-            codomain[i]=entry.box[i];
-        UpperBoxType original=problem.initial_domain;
-        reduce_full_scan_reference(solver,original,problem.function,codomain);
-        UpperBoxType instrumented=problem.initial_domain;
-        traced_reduce(solver,instrumented,problem.function,codomain,stats);
-        if(not same(original,instrumented))
+        ExactBoxType codomain = problem.codomains.front();
+        for (SizeType i = 0u; i < 4u; ++i)
+            codomain[i] = entry.box[i];
+        UpperBoxType original = problem.initial_domain;
+        reduce_full_scan_reference(solver, original, problem.function, codomain);
+        UpperBoxType instrumented = problem.initial_domain;
+        traced_reduce(solver, instrumented, problem.function, codomain, stats);
+        if (not same(original, instrumented))
             throw std::runtime_error(
-                "instrumented legacy reducer differs from full-scan reference for "+shape);
-        UpperBoxType production=problem.initial_domain;
-        solver.reduce(production,problem.function,codomain);
-        if(not same(original,production))
+                "instrumented legacy reducer differs from full-scan reference for " + shape);
+        UpperBoxType production = problem.initial_domain;
+        solver.reduce(production, problem.function, codomain);
+        if (not same(original, production))
             throw std::runtime_error(
-                "production reducer differs from full-scan reference for "+shape);
-        Bool empty=definitely(original.is_empty());
-        if(empty!=entry.separated) ++mismatch;
+                "production reducer differs from full-scan reference for " + shape);
+        Bool empty = definitely(original.is_empty());
+        if (empty != entry.separated)
+            ++mismatch;
     }
-    double sweep_ms=Bench::elapsed_ns(sweep_start,Bench::Clock::now())/1e6;
-    if(mismatch!=0u) throw std::runtime_error(
-        "solver replay disagrees with paving separation trace: "+shape+
-        " mismatches="+std::to_string(mismatch));
-    if(stats.queries!=records.size()
-       or stats.stopped_empty_hull+stats.stopped_empty_box+
-          stats.stopped_threshold!=stats.queries)
+    double sweep_ms = Bench::elapsed_ns(sweep_start, Bench::Clock::now()) / 1e6;
+    if (mismatch != 0u)
+        throw std::runtime_error(
+            "solver replay disagrees with paving separation trace: " + shape +
+            " mismatches=" + std::to_string(mismatch));
+    if (stats.queries != records.size() or stats.stopped_empty_hull + stats.stopped_empty_box +
+                                                   stats.stopped_threshold !=
+                                               stats.queries)
         throw std::runtime_error("inconsistent solver trace counters");
-    auto const& a=stats.box_activity;
-    if(a.calls!=stats.box_calls
-       or a.changed+a.unchanged!=a.calls
-       or a.emptied>a.changed or a.zero_evaluations>a.calls)
+    const auto& a = stats.box_activity;
+    if (a.calls != stats.box_calls or a.changed + a.unchanged != a.calls or a.emptied > a.changed or a.zero_evaluations > a.calls)
         throw std::runtime_error("inconsistent box contractor counters");
-    auto check_group=[&](std::vector<BoxCallStatistics> const& group) {
-        SizeType calls=0u,evals=0u,changed=0u,unchanged=0u;
-        SizeType emptied=0u,without_evaluation=0u;
-        for(BoxCallStatistics const& cell:group) {
-            calls+=cell.calls;
-            evals+=cell.evaluations;
-            changed+=cell.changed;
-            unchanged+=cell.unchanged;
-            emptied+=cell.emptied;
-            without_evaluation+=cell.zero_evaluations;
+    auto check_group = [&](const std::vector<BoxCallStatistics>& group) {
+        SizeType calls = 0u, evals = 0u, changed = 0u, unchanged = 0u;
+        SizeType emptied = 0u, without_evaluation = 0u;
+        for (const BoxCallStatistics& cell: group) {
+            calls += cell.calls;
+            evals += cell.evaluations;
+            changed += cell.changed;
+            unchanged += cell.unchanged;
+            emptied += cell.emptied;
+            without_evaluation += cell.zero_evaluations;
         }
-        if(calls!=a.calls or evals!=a.evaluations
-           or changed!=a.changed or unchanged!=a.unchanged
-           or emptied!=a.emptied
-           or without_evaluation!=a.zero_evaluations)
+        if (calls != a.calls or evals != a.evaluations or changed != a.changed or unchanged != a.unchanged or emptied != a.emptied or without_evaluation != a.zero_evaluations)
             throw std::runtime_error("inconsistent box group totals");
     };
     check_group(stats.by_output);
     check_group(stats.by_variable);
     check_group(stats.by_pair);
-    std::cout<<"TRACE_VERIFIED shape="<<shape
-             <<" d=4 f=3 queries="<<stats.queries
-             <<" definitely_separated="<<stats.proven_empty
-             <<" rounds="<<stats.rounds
-             <<" hull_calls="<<stats.hull_calls
-             <<" box_calls="<<stats.box_calls
-             <<" stop_hull="<<stats.stopped_empty_hull
-             <<" stop_box="<<stats.stopped_empty_box
-             <<" stop_threshold="<<stats.stopped_threshold<<"\n";
-    if(verify_only) return;
-    std::cout<<"SOLVER_TRACE shape="<<shape
-             <<" d=4 f=3"
-             <<" trace_queries="<<stats.queries
-             <<" instrumented_total_ms="<<std::fixed<<std::setprecision(4)
-                 <<1000.0*stats.total_seconds
-             <<" hull_ms="<<1000.0*stats.hull_seconds
-             <<" box_ms="<<1000.0*stats.box_seconds
-             <<" other_ms="<<1000.0*(
-                 stats.total_seconds-stats.hull_seconds-stats.box_seconds)
-             <<" paired_replay_wall_ms="<<sweep_ms
-             <<"\n";
-    std::cout<<"SOLVER_TRACE measures an instrumented legacy full-scan replay and"
-                " independent old-reference and production checks per input;"
-                " it is NOT a direct timing of paving::separated().\n";
+    std::cout << "TRACE_VERIFIED shape=" << shape
+              << " d=4 f=3 queries=" << stats.queries
+              << " definitely_separated=" << stats.proven_empty
+              << " rounds=" << stats.rounds
+              << " hull_calls=" << stats.hull_calls
+              << " box_calls=" << stats.box_calls
+              << " stop_hull=" << stats.stopped_empty_hull
+              << " stop_box=" << stats.stopped_empty_box
+              << " stop_threshold=" << stats.stopped_threshold << "\n";
+    if (verify_only)
+        return;
+    std::cout << "SOLVER_TRACE shape=" << shape
+              << " d=4 f=3"
+              << " trace_queries=" << stats.queries
+              << " instrumented_total_ms=" << std::fixed << std::setprecision(4)
+              << 1000.0 * stats.total_seconds
+              << " hull_ms=" << 1000.0 * stats.hull_seconds
+              << " box_ms=" << 1000.0 * stats.box_seconds
+              << " other_ms=" << 1000.0 * (stats.total_seconds - stats.hull_seconds - stats.box_seconds)
+              << " paired_replay_wall_ms=" << sweep_ms
+              << "\n";
+    std::cout << "SOLVER_TRACE measures an instrumented legacy full-scan replay and"
+                 " independent old-reference and production checks per input;"
+                 " it is NOT a direct timing of paving::separated().\n";
 
     // The benchmark already verifies final-domain equivalence before
     // reporting the activity counters. Slice evaluation counts are supplied
     // by the production contractor, not estimated from a copy of its loop.
-    std::cout<<"BOX_ACTIVITY shape="<<shape
-             <<" calls="<<a.calls
-             <<" evaluations="<<a.evaluations
-             <<" changed="<<a.changed
-             <<" unchanged="<<a.unchanged
-             <<" proven_empty="<<a.emptied
-             <<" zero_evaluations="<<a.zero_evaluations
-             <<" evaluations_per_call="<<std::fixed<<std::setprecision(3)
-                 <<(a.calls?static_cast<double>(a.evaluations)/a.calls:0.0)
-             <<" changed_percent="
-                 <<(a.calls?100.0*static_cast<double>(a.changed)/a.calls:0.0)
-             <<" unchanged_percent="
-                 <<(a.calls?100.0*static_cast<double>(a.unchanged)/a.calls:0.0)
-             <<"\n";
-    std::cout<<"BOX_ACTIVITY changed means an interval was contracted"
-                " or proved empty; unchanged does NOT imply that a"
-                " call was safely skippable.\n";
+    std::cout << "BOX_ACTIVITY shape=" << shape
+              << " calls=" << a.calls
+              << " evaluations=" << a.evaluations
+              << " changed=" << a.changed
+              << " unchanged=" << a.unchanged
+              << " proven_empty=" << a.emptied
+              << " zero_evaluations=" << a.zero_evaluations
+              << " evaluations_per_call=" << std::fixed << std::setprecision(3)
+              << (a.calls ? static_cast<double>(a.evaluations) / a.calls : 0.0)
+              << " changed_percent="
+              << (a.calls ? 100.0 * static_cast<double>(a.changed) / a.calls : 0.0)
+              << " unchanged_percent="
+              << (a.calls ? 100.0 * static_cast<double>(a.unchanged) / a.calls : 0.0)
+              << "\n";
+    std::cout << "BOX_ACTIVITY changed means an interval was contracted"
+                 " or proved empty; unchanged does NOT imply that a"
+                 " call was safely skippable.\n";
 
-    std::cout<<std::string(118,'=')<<"\n"
-             <<std::left<<std::setw(19)<<"Shape"
-             <<std::setw(14)<<"Group"
-             <<std::right<<std::setw(6)<<"Index"
-             <<std::setw(13)<<"Calls"
-             <<std::setw(15)<<"Evaluations"
-             <<std::setw(13)<<"Changed"
-             <<std::setw(13)<<"Unchanged"
-             <<std::setw(12)<<"Empty"
-             <<std::setw(13)<<"Time (ms)"<<"\n"
-             <<std::string(118,'-')<<"\n";
-    auto row=[&](char const* group,SizeType index,BoxCallStatistics const& b) {
-        std::cout<<std::left<<std::setw(19)<<shape
-                 <<std::setw(14)<<group
-                 <<std::right<<std::setw(6)<<index
-                 <<std::setw(13)<<b.calls
-                 <<std::setw(15)<<b.evaluations
-                 <<std::setw(13)<<b.changed
-                 <<std::setw(13)<<b.unchanged
-                 <<std::setw(12)<<b.emptied
-                 <<std::fixed<<std::setprecision(3)
-                 <<std::setw(13)<<(1000.0*b.seconds)<<"\n";
+    std::cout << std::string(118, '=') << "\n"
+              << std::left << std::setw(19) << "Shape"
+              << std::setw(14) << "Group"
+              << std::right << std::setw(6) << "Index"
+              << std::setw(13) << "Calls"
+              << std::setw(15) << "Evaluations"
+              << std::setw(13) << "Changed"
+              << std::setw(13) << "Unchanged"
+              << std::setw(12) << "Empty"
+              << std::setw(13) << "Time (ms)" << "\n"
+              << std::string(118, '-') << "\n";
+    auto row = [&](const char* group, SizeType index, const BoxCallStatistics& b) {
+        std::cout << std::left << std::setw(19) << shape
+                  << std::setw(14) << group
+                  << std::right << std::setw(6) << index
+                  << std::setw(13) << b.calls
+                  << std::setw(15) << b.evaluations
+                  << std::setw(13) << b.changed
+                  << std::setw(13) << b.unchanged
+                  << std::setw(12) << b.emptied
+                  << std::fixed << std::setprecision(3)
+                  << std::setw(13) << (1000.0 * b.seconds) << "\n";
     };
-    for(SizeType i=0u;i<stats.by_output.size();++i) {
-        row(i<4u?"image-axis":"constraint",i,stats.by_output[i]);
+    for (SizeType i = 0u; i < stats.by_output.size(); ++i) {
+        row(i < 4u ? "image-axis" : "constraint", i, stats.by_output[i]);
     }
-    std::cout<<std::string(118,'-')<<"\n";
-    for(SizeType j=0u;j<stats.by_variable.size();++j) {
-        row("variable",j,stats.by_variable[j]);
+    std::cout << std::string(118, '-') << "\n";
+    for (SizeType j = 0u; j < stats.by_variable.size(); ++j) {
+        row("variable", j, stats.by_variable[j]);
     }
-    std::cout<<std::string(118,'=')<<"\n";
+    std::cout << std::string(118, '=') << "\n";
 
     // Show the hottest output-variable pairs without producing 48 lines
     // per shape. Group totals above remain exhaustive.
     std::vector<SizeType> ranks;
     ranks.reserve(stats.by_pair.size());
-    for(SizeType index=0u;index<stats.by_pair.size();++index)
+    for (SizeType index = 0u; index < stats.by_pair.size(); ++index)
         ranks.push_back(index);
-    std::sort(ranks.begin(),ranks.end(),
-        [&](SizeType lhs_index,SizeType rhs_index) {
-            return stats.by_pair[lhs_index].seconds
-                 > stats.by_pair[rhs_index].seconds;
-        });
-    SizeType dimensions=stats.by_variable.size();
-    for(SizeType rank=0u;rank<std::min(SizeType(8u),ranks.size());++rank) {
-        SizeType index=ranks[rank];
-        BoxCallStatistics const& b=stats.by_pair[index];
-        std::cout<<"BOX_HOT_PAIR shape="<<shape
-                 <<" rank="<<(rank+1u)
-                 <<" output="<<(index/dimensions)
-                 <<" variable="<<(index%dimensions)
-                 <<" calls="<<b.calls
-                 <<" evaluations="<<b.evaluations
-                 <<" changed="<<b.changed
-                 <<" unchanged="<<b.unchanged
-                 <<" ms="<<std::fixed<<std::setprecision(4)
-                     <<1000.0*b.seconds<<"\n";
+    std::sort(ranks.begin(), ranks.end(),
+              [&](SizeType lhs_index, SizeType rhs_index) {
+                  return stats.by_pair[lhs_index].seconds > stats.by_pair[rhs_index].seconds;
+              });
+    SizeType dimensions = stats.by_variable.size();
+    for (SizeType rank = 0u; rank < std::min(SizeType(8u), ranks.size()); ++rank) {
+        SizeType index = ranks[rank];
+        const BoxCallStatistics& b = stats.by_pair[index];
+        std::cout << "BOX_HOT_PAIR shape=" << shape
+                  << " rank=" << (rank + 1u)
+                  << " output=" << (index / dimensions)
+                  << " variable=" << (index % dimensions)
+                  << " calls=" << b.calls
+                  << " evaluations=" << b.evaluations
+                  << " changed=" << b.changed
+                  << " unchanged=" << b.unchanged
+                  << " ms=" << std::fixed << std::setprecision(4)
+                  << 1000.0 * b.seconds << "\n";
     }
 }
 
@@ -1161,60 +1179,64 @@ void profile_adaptive_trace(std::string const& prefix,
 // certificate stays valid for the rest of this query. Neither a static
 // shape assumption nor a nonvalidated floating tolerance is used.
 struct ContainedSkipStatistics {
-    SizeType tests=0u;
-    SizeType certificates=0u;
-    SizeType reused_certificates=0u;
-    SizeType saved_box_calls=0u;
-    SizeType executed_box_calls=0u;
+    SizeType tests = 0u;
+    SizeType certificates = 0u;
+    SizeType reused_certificates = 0u;
+    SizeType saved_box_calls = 0u;
+    SizeType executed_box_calls = 0u;
 };
 
-void reduce_contained_skip(ConstraintSolver const& solver,
+void reduce_contained_skip(const ConstraintSolver& solver,
                            UpperBoxType& domain,
-                           ValidatedVectorMultivariateFunction const& function,
-                           ExactBoxType const& codomain,
-                           ContainedSkipStatistics* statistics=nullptr) {
-    const ExactDouble MINIMUM_REDUCTION=0.75_x;
-    if(definitely(domain.is_empty())) return;
+                           const ValidatedVectorMultivariateFunction& function,
+                           const ExactBoxType& codomain,
+                           ContainedSkipStatistics* statistics = nullptr) {
+    const ExactDouble MINIMUM_REDUCTION = 0.75_x;
+    if (definitely(domain.is_empty()))
+        return;
 
-    std::vector<Bool> proved(codomain.size(),false);
-    FloatDPUpperBound magnitude={0u,dp};
-    for(SizeType j=0u;j<domain.size();++j)
-        magnitude+=domain[j].width();
-    FloatDPUpperBound previous=magnitude;
+    std::vector<Bool> proved(codomain.size(), false);
+    FloatDPUpperBound magnitude = {0u, dp};
+    for (SizeType j = 0u; j < domain.size(); ++j)
+        magnitude += domain[j].width();
+    FloatDPUpperBound previous = magnitude;
 
     do {
-        solver.hull_reduce(domain,function,codomain);
-        if(definitely(domain.is_empty())) return;
+        solver.hull_reduce(domain, function, codomain);
+        if (definitely(domain.is_empty()))
+            return;
 
-        for(SizeType i=0u;i<codomain.size();++i) {
-            if(proved[i]) {
-                if(statistics) {
+        for (SizeType i = 0u; i < codomain.size(); ++i) {
+            if (proved[i]) {
+                if (statistics) {
                     ++statistics->reused_certificates;
-                    statistics->saved_box_calls+=domain.size();
+                    statistics->saved_box_calls += domain.size();
                 }
                 continue;
             }
-            if(statistics) ++statistics->tests;
-            if(definitely(subset(apply(function[i],domain),codomain[i]))) {
-                proved[i]=true;
-                if(statistics) {
+            if (statistics)
+                ++statistics->tests;
+            if (definitely(subset(apply(function[i], domain), codomain[i]))) {
+                proved[i] = true;
+                if (statistics) {
                     ++statistics->certificates;
-                    statistics->saved_box_calls+=domain.size();
+                    statistics->saved_box_calls += domain.size();
                 }
                 continue;
             }
-            for(SizeType j=0u;j<domain.size();++j) {
-                if(statistics) ++statistics->executed_box_calls;
-                solver.box_reduce(domain,function[i],codomain[i],j);
-                if(definitely(domain.is_empty())) return;
+            for (SizeType j = 0u; j < domain.size(); ++j) {
+                if (statistics)
+                    ++statistics->executed_box_calls;
+                solver.box_reduce(domain, function[i], codomain[i], j);
+                if (definitely(domain.is_empty()))
+                    return;
             }
         }
-        previous=magnitude;
-        magnitude=0u;
-        for(SizeType j=0u;j<domain.size();++j)
-            magnitude+=domain[j].width();
-    } while(magnitude.raw()
-            < mul(near,previous.raw(),FloatDP(MINIMUM_REDUCTION,dp)));
+        previous = magnitude;
+        magnitude = 0u;
+        for (SizeType j = 0u; j < domain.size(); ++j)
+            magnitude += domain[j].width();
+    } while (magnitude.raw() < mul(near, previous.raw(), FloatDP(MINIMUM_REDUCTION, dp)));
 }
 
 // Use the framework's timing boundaries, calibration, samples and
@@ -1228,220 +1250,229 @@ struct Timing {
 };
 
 template<class Work>
-Timing median_ms(Work&& work,Selection const& selection,
-                 std::string const& name="constraint-reduce") {
-    unsigned iterations=1u;
-    auto pilot=[&](unsigned count) {
+Timing median_ms(Work&& work, const Selection& selection,
+                 const std::string& name = "constraint-reduce") {
+    unsigned iterations = 1u;
+    auto pilot = [&](unsigned count) {
         return Bench::measure_ns([&] {
-            for(unsigned i=0u;i<count;++i) {
-                auto value=work();
+            for (unsigned i = 0u; i < count; ++i) {
+                auto value = work();
                 Bench::keep_alive(value);
             }
         });
     };
-    double elapsed=pilot(iterations);
-    double const minimum_ns=static_cast<double>(selection.min_sample_ms)*1e6;
+    double elapsed = pilot(iterations);
+    const double minimum_ns = static_cast<double>(selection.min_sample_ms) * 1e6;
     // Preserve repeat-until-minimum behaviour; use the common calibration
     // estimate to avoid the local duplicated duration/repetition formula.
-    while(elapsed<minimum_ns && iterations<selection.max_iterations) {
-        unsigned next=0u;
-        if(elapsed<=0.0 || not std::isfinite(elapsed)) {
-            next=iterations>selection.max_iterations/2u
-                ? selection.max_iterations:iterations*2u;
+    while (elapsed < minimum_ns && iterations < selection.max_iterations) {
+        unsigned next = 0u;
+        if (elapsed <= 0.0 || not std::isfinite(elapsed)) {
+            next = iterations > selection.max_iterations / 2u
+                     ? selection.max_iterations
+                     : iterations * 2u;
         } else {
-            next=Bench::calibrated_repetitions(
-                elapsed,minimum_ns,iterations,selection.max_iterations);
+            next = Bench::calibrated_repetitions(
+                elapsed, minimum_ns, iterations, selection.max_iterations);
         }
-        if(next<=iterations) {
+        if (next <= iterations) {
             // A clamped calibration may round down; guarantee progress.
-            next=iterations>selection.max_iterations/2u
-                ? selection.max_iterations:iterations*2u;
+            next = iterations > selection.max_iterations / 2u
+                     ? selection.max_iterations
+                     : iterations * 2u;
         }
-        if(next==iterations) break;
-        iterations=next;
-        elapsed=pilot(iterations);
+        if (next == iterations)
+            break;
+        iterations = next;
+        elapsed = pilot(iterations);
     }
-    Bench::Runner runner(selection.warmups,selection.shapes.size());
-    Bench::Samples const samples=runner.run(name,selection.samples,
-        [] {},
-        [&] {
+    Bench::Runner runner(selection.warmups, selection.shapes.size());
+    const Bench::Samples samples = runner.run(name, selection.samples, [] {}, [&] {
             for(unsigned i=0u;i<iterations;++i) {
                 auto value=work();
                 Bench::keep_alive(value);
-            }
-        },
-        [] {},
-        static_cast<double>(iterations));
-    Bench::Statistics const statistics=Bench::summarize(samples);
-    if(not std::isfinite(statistics.median) || statistics.median<=0.0)
+            } }, [] {}, static_cast<double>(iterations));
+    const Bench::Statistics statistics = Bench::summarize(samples);
+    if (not std::isfinite(statistics.median) || statistics.median <= 0.0)
         throw std::runtime_error("nonfinite/nonpositive timing");
-    return {statistics.median/1e6,iterations,statistics};
+    return {statistics.median / 1e6, iterations, statistics};
 }
 
 // Same immutable adaptive query sequence and contract for both variants.
 // Preparation and correctness checks are deliberately outside timed loops.
-void compare_contained_skip(Selection const& selection,
-                            std::string const& shape) {
-    SolverProblem problem=make_problem(shape);
-    std::vector<TraceRecord> const trace=
-        read_adaptive_trace(selection.trace_prefix,shape);
+void compare_contained_skip(const Selection& selection,
+                            const std::string& shape) {
+    SolverProblem problem = make_problem(shape);
+    const std::vector<TraceRecord> trace =
+        read_adaptive_trace(selection.trace_prefix, shape);
     std::vector<ExactBoxType> targets;
     targets.reserve(trace.size());
-    for(TraceRecord const& entry:trace) {
-        ExactBoxType codomain=problem.codomains.front();
-        for(SizeType j=0u;j<4u;++j) codomain[j]=entry.box[j];
+    for (const TraceRecord& entry: trace) {
+        ExactBoxType codomain = problem.codomains.front();
+        for (SizeType j = 0u; j < 4u; ++j)
+            codomain[j] = entry.box[j];
         targets.push_back(std::move(codomain));
     }
     ConstraintSolver solver;
     ContainedSkipStatistics counters;
-    SizeType oracle_empty=0u;
-    for(SizeType q=0u;q<targets.size();++q) {
-        UpperBoxType baseline=problem.initial_domain;
-        reduce_full_scan_reference(solver,baseline,problem.function,targets[q]);
-        UpperBoxType candidate=problem.initial_domain;
+    SizeType oracle_empty = 0u;
+    for (SizeType q = 0u; q < targets.size(); ++q) {
+        UpperBoxType baseline = problem.initial_domain;
+        reduce_full_scan_reference(solver, baseline, problem.function, targets[q]);
+        UpperBoxType candidate = problem.initial_domain;
         reduce_contained_skip(
-            solver,candidate,problem.function,targets[q],&counters);
-        UpperBoxType production=problem.initial_domain;
-        solver.reduce(production,problem.function,targets[q]);
-        if(not same(candidate,production))
+            solver, candidate, problem.function, targets[q], &counters);
+        UpperBoxType production = problem.initial_domain;
+        solver.reduce(production, problem.function, targets[q]);
+        if (not same(candidate, production))
             throw std::runtime_error(
                 "production differs from experimental containment reduction"
-                " shape="+shape+" query="+std::to_string(q));
-        if(not same(baseline,candidate)) {
+                " shape=" +
+                shape + " query=" + std::to_string(q));
+        if (not same(baseline, candidate)) {
             throw std::runtime_error(
                 "certified containment pruning changed the contracted domain"
-                " shape="+shape+" query="+std::to_string(q));
+                " shape=" +
+                shape + " query=" + std::to_string(q));
         }
-        Bool empty=definitely(baseline.is_empty());
-        if(empty!=trace[q].separated) {
+        Bool empty = definitely(baseline.is_empty());
+        if (empty != trace[q].separated) {
             throw std::runtime_error(
                 "baseline separation changed relative to paving trace"
-                " shape="+shape+" query="+std::to_string(q));
+                " shape=" +
+                shape + " query=" + std::to_string(q));
         }
-        oracle_empty+=static_cast<SizeType>(empty);
+        oracle_empty += static_cast<SizeType>(empty);
     }
-    std::cout<<"CONTAINED_SKIP_VERIFIED shape="<<shape
-             <<" d=4 f=3 queries="<<targets.size()
-             <<" separated="<<oracle_empty
-             <<" guard_tests="<<counters.tests
-             <<" guard_proofs="<<counters.certificates
-             <<" reused_proofs="<<counters.reused_certificates
-             <<" saved_box_calls="<<counters.saved_box_calls
-             <<" executed_box_calls="<<counters.executed_box_calls
-             <<"\n";
+    std::cout << "CONTAINED_SKIP_VERIFIED shape=" << shape
+              << " d=4 f=3 queries=" << targets.size()
+              << " separated=" << oracle_empty
+              << " guard_tests=" << counters.tests
+              << " guard_proofs=" << counters.certificates
+              << " reused_proofs=" << counters.reused_certificates
+              << " saved_box_calls=" << counters.saved_box_calls
+              << " executed_box_calls=" << counters.executed_box_calls
+              << "\n";
 
-    if(selection.verify_only) return;
-    auto original=[&] {
-        SizeType checksum=0u;
-        for(ExactBoxType const& target:targets) {
-            UpperBoxType domain=problem.initial_domain;
+    if (selection.verify_only)
+        return;
+    auto original = [&] {
+        SizeType checksum = 0u;
+        for (const ExactBoxType& target: targets) {
+            UpperBoxType domain = problem.initial_domain;
             reduce_full_scan_reference(
-                solver,domain,problem.function,target);
-            checksum+=static_cast<SizeType>(definitely(domain.is_empty()));
+                solver, domain, problem.function, target);
+            checksum += static_cast<SizeType>(definitely(domain.is_empty()));
             keep_alive(domain);
         }
         return checksum;
     };
-    auto optimized=[&] {
-        SizeType checksum=0u;
-        for(ExactBoxType const& target:targets) {
-            UpperBoxType domain=problem.initial_domain;
-            solver.reduce(domain,problem.function,target);
-            checksum+=static_cast<SizeType>(definitely(domain.is_empty()));
+    auto optimized = [&] {
+        SizeType checksum = 0u;
+        for (const ExactBoxType& target: targets) {
+            UpperBoxType domain = problem.initial_domain;
+            solver.reduce(domain, problem.function, target);
+            checksum += static_cast<SizeType>(definitely(domain.is_empty()));
             keep_alive(domain);
         }
         return checksum;
     };
-    if(original()!=oracle_empty or optimized()!=oracle_empty)
+    if (original() != oracle_empty or optimized() != oracle_empty)
         throw std::runtime_error("contained skip sweep checksum mismatch");
-    Timing original_time=median_ms(original,selection);
-    Timing optimized_time=median_ms(optimized,selection);
-    double ratio=original_time.milliseconds/optimized_time.milliseconds;
-    if(not std::isfinite(ratio) or ratio<=0.0)
+    Timing original_time = median_ms(original, selection);
+    Timing optimized_time = median_ms(optimized, selection);
+    double ratio = original_time.milliseconds / optimized_time.milliseconds;
+    if (not std::isfinite(ratio) or ratio <= 0.0)
         throw std::runtime_error("invalid contained skip speedup");
-    std::cout<<"CONTAINED_SKIP_COMPARE shape="<<shape
-             <<" d=4 f=3 queries="<<targets.size()
-             <<" baseline_median_ms="<<std::fixed<<std::setprecision(5)
-                <<original_time.milliseconds
-             <<" guarded_median_ms="<<optimized_time.milliseconds
-             <<" speedup="<<std::setprecision(3)<<ratio
-             <<" baseline_iters="<<original_time.iterations
-             <<" guarded_iters="<<optimized_time.iterations
-             <<" samples="<<selection.samples
-             <<" min_sample_ms="<<selection.min_sample_ms
-             <<"\n";
-    std::cout<<"CONTAINED_SKIP_COMPARE uses independent calibrated medians"
-                " and requires exact final-domain and separation equality"
-                " for every adaptive query. Production compared to frozen full scan.\n";
+    std::cout << "CONTAINED_SKIP_COMPARE shape=" << shape
+              << " d=4 f=3 queries=" << targets.size()
+              << " baseline_median_ms=" << std::fixed << std::setprecision(5)
+              << original_time.milliseconds
+              << " guarded_median_ms=" << optimized_time.milliseconds
+              << " speedup=" << std::setprecision(3) << ratio
+              << " baseline_iters=" << original_time.iterations
+              << " guarded_iters=" << optimized_time.iterations
+              << " samples=" << selection.samples
+              << " min_sample_ms=" << selection.min_sample_ms
+              << "\n";
+    std::cout << "CONTAINED_SKIP_COMPARE uses independent calibrated medians"
+                 " and requires exact final-domain and separation equality"
+                 " for every adaptive query. Production compared to frozen full scan.\n";
 }
 
 // Experimental P2: a Procedure makes the syntactic input-coordinate
 // dependency set explicit via IndexProcedureInstruction. This is a
 // conservative mask: unused coordinates are absent even when the
 // non-linear interval extension is inconclusive about containment.
-using DependencyMasks=std::vector<std::vector<unsigned char>>;
+using DependencyMasks = std::vector<std::vector<unsigned char>>;
 
 DependencyMasks compile_dependency_masks(
-        ValidatedVectorMultivariateFunction const& function) {
+    const ValidatedVectorMultivariateFunction& function) {
     DependencyMasks masks(
         function.result_size(),
-        std::vector<unsigned char>(function.argument_size(),0u));
-    for(SizeType i=0u;i<function.result_size();++i) {
+        std::vector<unsigned char>(function.argument_size(), 0u));
+    for (SizeType i = 0u; i < function.result_size(); ++i) {
         ValidatedProcedure procedure(function[i]);
-        for(auto const& instruction:procedure._instructions) {
-            auto const* index=std::get_if<IndexProcedureInstruction>(
+        for (const auto& instruction: procedure._instructions) {
+            const auto* index = std::get_if<IndexProcedureInstruction>(
                 &instruction.base());
-            if(index==nullptr) continue;
-            if(index->_ind>=function.argument_size())
+            if (index == nullptr)
+                continue;
+            if (index->_ind >= function.argument_size())
                 throw std::runtime_error("invalid procedure dependency index");
-            masks[i][index->_ind]=1u;
+            masks[i][index->_ind] = 1u;
         }
     }
     return masks;
 }
 
 struct DependencySkipStatistics {
-    SizeType guard_tests=0u;
-    SizeType certified_outputs=0u;
-    SizeType reused_certificates=0u;
-    SizeType skipped_pairs=0u;
-    SizeType executed_box_calls=0u;
-    SizeType disjoint_fallback_outputs=0u;
+    SizeType guard_tests = 0u;
+    SizeType certified_outputs = 0u;
+    SizeType reused_certificates = 0u;
+    SizeType skipped_pairs = 0u;
+    SizeType executed_box_calls = 0u;
+    SizeType disjoint_fallback_outputs = 0u;
 };
 
 void reduce_dependency_skip(
-        ConstraintSolver const& solver,UpperBoxType& domain,
-        ValidatedVectorMultivariateFunction const& function,
-        ExactBoxType const& codomain,DependencyMasks const& masks,
-        DependencySkipStatistics* stats=nullptr) {
-    const ExactDouble MINIMUM_REDUCTION=0.75_x;
-    if(masks.size()!=codomain.size())
+    const ConstraintSolver& solver, UpperBoxType& domain,
+    const ValidatedVectorMultivariateFunction& function,
+    const ExactBoxType& codomain, const DependencyMasks& masks,
+    DependencySkipStatistics* stats = nullptr) {
+    const ExactDouble MINIMUM_REDUCTION = 0.75_x;
+    if (masks.size() != codomain.size())
         throw std::invalid_argument("dependency output dimension mismatch");
-    for(auto const& mask:masks) {
-        if(mask.size()!=domain.size())
+    for (const auto& mask: masks) {
+        if (mask.size() != domain.size())
             throw std::invalid_argument("dependency input dimension mismatch");
     }
-    if(definitely(domain.is_empty())) return;
+    if (definitely(domain.is_empty()))
+        return;
 
-    std::vector<Bool> certified_satisfied(codomain.size(),false);
-    FloatDPUpperBound magnitude={0u,dp};
-    for(SizeType j=0u;j<domain.size();++j)
-        magnitude+=domain[j].width();
-    FloatDPUpperBound previous=magnitude;
+    std::vector<Bool> certified_satisfied(codomain.size(), false);
+    FloatDPUpperBound magnitude = {0u, dp};
+    for (SizeType j = 0u; j < domain.size(); ++j)
+        magnitude += domain[j].width();
+    FloatDPUpperBound previous = magnitude;
     do {
-        solver.hull_reduce(domain,function,codomain);
-        if(definitely(domain.is_empty())) return;
-        for(SizeType i=0u;i<codomain.size();++i) {
-            if(certified_satisfied[i]) {
-                if(stats) ++stats->reused_certificates;
+        solver.hull_reduce(domain, function, codomain);
+        if (definitely(domain.is_empty()))
+            return;
+        for (SizeType i = 0u; i < codomain.size(); ++i) {
+            if (certified_satisfied[i]) {
+                if (stats)
+                    ++stats->reused_certificates;
                 continue;
             }
 
-            if(stats) ++stats->guard_tests;
-            UpperIntervalType image=Ariadne::apply(function[i],domain);
-            if(definitely(subset(image,codomain[i]))) {
-                certified_satisfied[i]=true;
-                if(stats) ++stats->certified_outputs;
+            if (stats)
+                ++stats->guard_tests;
+            UpperIntervalType image = Ariadne::apply(function[i], domain);
+            if (definitely(subset(image, codomain[i]))) {
+                certified_satisfied[i] = true;
+                if (stats)
+                    ++stats->certified_outputs;
                 continue;
             }
 
@@ -1451,29 +1482,29 @@ void reduce_dependency_skip(
             // This conservative fallback avoids losing an emptiness
             // detection when the hull and direct interval evaluations
             // happen to have different pruning strength.
-            Bool const any_independent=
-                std::find(masks[i].begin(),masks[i].end(),0u)
-                !=masks[i].end();
-            Bool const disjoint_fallback=any_independent
-                and definitely(disjoint(image,codomain[i]));
-            if(disjoint_fallback and stats)
+            const Bool any_independent =
+                std::find(masks[i].begin(), masks[i].end(), 0u) != masks[i].end();
+            const Bool disjoint_fallback = any_independent and definitely(disjoint(image, codomain[i]));
+            if (disjoint_fallback and stats)
                 ++stats->disjoint_fallback_outputs;
-            for(SizeType j=0u;j<domain.size();++j) {
-                if(not disjoint_fallback and masks[i][j]==0u) {
-                    if(stats) ++stats->skipped_pairs;
+            for (SizeType j = 0u; j < domain.size(); ++j) {
+                if (not disjoint_fallback and masks[i][j] == 0u) {
+                    if (stats)
+                        ++stats->skipped_pairs;
                     continue;
                 }
-                if(stats) ++stats->executed_box_calls;
-                solver.box_reduce(domain,function[i],codomain[i],j);
-                if(definitely(domain.is_empty())) return;
+                if (stats)
+                    ++stats->executed_box_calls;
+                solver.box_reduce(domain, function[i], codomain[i], j);
+                if (definitely(domain.is_empty()))
+                    return;
             }
         }
-        previous=magnitude;
-        magnitude=0u;
-        for(SizeType j=0u;j<domain.size();++j)
-            magnitude+=domain[j].width();
-    } while(magnitude.raw()
-            < mul(near,previous.raw(),FloatDP(MINIMUM_REDUCTION,dp)));
+        previous = magnitude;
+        magnitude = 0u;
+        for (SizeType j = 0u; j < domain.size(); ++j)
+            magnitude += domain[j].width();
+    } while (magnitude.raw() < mul(near, previous.raw(), FloatDP(MINIMUM_REDUCTION, dp)));
 }
 
 // Compare the production contained-skip reducer against an additional
@@ -1481,134 +1512,137 @@ void reduce_dependency_skip(
 // a one-time per-function setup and *inside* the per-query hot path;
 // the latter is the realistic cost of using this optimization directly
 // in the current reduce() API, which receives uncompiled functions.
-void compare_dependency_skip(Selection const& selection,
-                             std::string const& shape) {
-    SolverProblem problem=make_problem(shape);
-    std::vector<TraceRecord> const trace=
-        read_adaptive_trace(selection.trace_prefix,shape);
+void compare_dependency_skip(const Selection& selection,
+                             const std::string& shape) {
+    SolverProblem problem = make_problem(shape);
+    const std::vector<TraceRecord> trace =
+        read_adaptive_trace(selection.trace_prefix, shape);
     std::vector<ExactBoxType> targets;
     targets.reserve(trace.size());
-    for(TraceRecord const& entry:trace) {
-        ExactBoxType codomain=problem.codomains.front();
-        for(SizeType j=0u;j<4u;++j) codomain[j]=entry.box[j];
+    for (const TraceRecord& entry: trace) {
+        ExactBoxType codomain = problem.codomains.front();
+        for (SizeType j = 0u; j < 4u; ++j)
+            codomain[j] = entry.box[j];
         targets.push_back(std::move(codomain));
     }
 
     ConstraintSolver solver;
-    DependencyMasks const prepared=compile_dependency_masks(problem.function);
-    SizeType total_edges=0u;
-    for(auto const& mask:prepared) {
-        for(unsigned char bit:mask)
-            total_edges+=static_cast<SizeType>(bit!=0u);
+    const DependencyMasks prepared = compile_dependency_masks(problem.function);
+    SizeType total_edges = 0u;
+    for (const auto& mask: prepared) {
+        for (unsigned char bit: mask)
+            total_edges += static_cast<SizeType>(bit != 0u);
     }
     DependencySkipStatistics stats;
-    SizeType separated=0u;
-    for(SizeType q=0u;q<targets.size();++q) {
-        UpperBoxType baseline=problem.initial_domain;
-        solver.reduce(baseline,problem.function,targets[q]);
-        UpperBoxType candidate=problem.initial_domain;
+    SizeType separated = 0u;
+    for (SizeType q = 0u; q < targets.size(); ++q) {
+        UpperBoxType baseline = problem.initial_domain;
+        solver.reduce(baseline, problem.function, targets[q]);
+        UpperBoxType candidate = problem.initial_domain;
         reduce_dependency_skip(
-            solver,candidate,problem.function,targets[q],prepared,&stats);
-        if(not same(candidate,baseline)) {
+            solver, candidate, problem.function, targets[q], prepared, &stats);
+        if (not same(candidate, baseline)) {
             throw std::runtime_error(
                 "dependency pruning changed production contracted domain"
-                " shape="+shape+" query="+std::to_string(q));
+                " shape=" +
+                shape + " query=" + std::to_string(q));
         }
-        UpperBoxType legacy=problem.initial_domain;
-        reduce_full_scan_reference(solver,legacy,problem.function,targets[q]);
-        if(not same(legacy,baseline)) {
+        UpperBoxType legacy = problem.initial_domain;
+        reduce_full_scan_reference(solver, legacy, problem.function, targets[q]);
+        if (not same(legacy, baseline)) {
             throw std::runtime_error(
                 "production differs from legacy full-scan oracle"
-                " shape="+shape+" query="+std::to_string(q));
+                " shape=" +
+                shape + " query=" + std::to_string(q));
         }
-        Bool const empty=definitely(baseline.is_empty());
-        if(empty!=trace[q].separated) {
+        const Bool empty = definitely(baseline.is_empty());
+        if (empty != trace[q].separated) {
             throw std::runtime_error(
                 "replayed separation does not match exported paving trace"
-                " shape="+shape+" query="+std::to_string(q));
+                " shape=" +
+                shape + " query=" + std::to_string(q));
         }
-        separated+=static_cast<SizeType>(empty);
+        separated += static_cast<SizeType>(empty);
     }
-    std::cout<<"DEPENDENCY_SKIP_VERIFIED shape="<<shape
-             <<" d=4 f=3 queries="<<targets.size()
-             <<" separated="<<separated
-             <<" edges="<<total_edges
-             <<" possible_edges="<<(prepared.size()*problem.initial_domain.size())
-             <<" guard_tests="<<stats.guard_tests
-             <<" guard_proofs="<<stats.certified_outputs
-             <<" reused_proofs="<<stats.reused_certificates
-             <<" dependency_skipped="<<stats.skipped_pairs
-             <<" executed_box_calls="<<stats.executed_box_calls
-             <<" disjoint_fallbacks="<<stats.disjoint_fallback_outputs
-             <<"\n";
-    if(selection.verify_only) return;
+    std::cout << "DEPENDENCY_SKIP_VERIFIED shape=" << shape
+              << " d=4 f=3 queries=" << targets.size()
+              << " separated=" << separated
+              << " edges=" << total_edges
+              << " possible_edges=" << (prepared.size() * problem.initial_domain.size())
+              << " guard_tests=" << stats.guard_tests
+              << " guard_proofs=" << stats.certified_outputs
+              << " reused_proofs=" << stats.reused_certificates
+              << " dependency_skipped=" << stats.skipped_pairs
+              << " executed_box_calls=" << stats.executed_box_calls
+              << " disjoint_fallbacks=" << stats.disjoint_fallback_outputs
+              << "\n";
+    if (selection.verify_only)
+        return;
 
-    auto original=[&]() {
-        SizeType checksum=0u;
-        for(ExactBoxType const& codomain:targets) {
-            UpperBoxType domain=problem.initial_domain;
-            solver.reduce(domain,problem.function,codomain);
-            checksum+=static_cast<SizeType>(definitely(domain.is_empty()));
+    auto original = [&]() {
+        SizeType checksum = 0u;
+        for (const ExactBoxType& codomain: targets) {
+            UpperBoxType domain = problem.initial_domain;
+            solver.reduce(domain, problem.function, codomain);
+            checksum += static_cast<SizeType>(definitely(domain.is_empty()));
             keep_alive(domain);
         }
         return checksum;
     };
-    auto prepared_work=[&]() {
-        SizeType checksum=0u;
-        for(ExactBoxType const& codomain:targets) {
-            UpperBoxType domain=problem.initial_domain;
+    auto prepared_work = [&]() {
+        SizeType checksum = 0u;
+        for (const ExactBoxType& codomain: targets) {
+            UpperBoxType domain = problem.initial_domain;
             reduce_dependency_skip(
-                solver,domain,problem.function,codomain,prepared);
-            checksum+=static_cast<SizeType>(definitely(domain.is_empty()));
+                solver, domain, problem.function, codomain, prepared);
+            checksum += static_cast<SizeType>(definitely(domain.is_empty()));
             keep_alive(domain);
         }
         return checksum;
     };
-    auto rebuilt_work=[&]() {
-        SizeType checksum=0u;
-        for(ExactBoxType const& codomain:targets) {
-            DependencyMasks masks=compile_dependency_masks(problem.function);
-            UpperBoxType domain=problem.initial_domain;
+    auto rebuilt_work = [&]() {
+        SizeType checksum = 0u;
+        for (const ExactBoxType& codomain: targets) {
+            DependencyMasks masks = compile_dependency_masks(problem.function);
+            UpperBoxType domain = problem.initial_domain;
             reduce_dependency_skip(
-                solver,domain,problem.function,codomain,masks);
-            checksum+=static_cast<SizeType>(definitely(domain.is_empty()));
+                solver, domain, problem.function, codomain, masks);
+            checksum += static_cast<SizeType>(definitely(domain.is_empty()));
             keep_alive(domain);
         }
         return checksum;
     };
 
-    if(original()!=separated or prepared_work()!=separated
-       or rebuilt_work()!=separated) {
+    if (original() != separated or prepared_work() != separated or rebuilt_work() != separated) {
         throw std::runtime_error(
-            "dependency pruning sweep checksum mismatch for "+shape);
+            "dependency pruning sweep checksum mismatch for " + shape);
     }
-    Timing production=median_ms(original,selection);
-    Timing prepared_time=median_ms(prepared_work,selection);
-    Timing rebuilt_time=median_ms(rebuilt_work,selection);
-    double prepared_ratio=production.milliseconds/prepared_time.milliseconds;
-    double rebuilt_ratio=production.milliseconds/rebuilt_time.milliseconds;
-    if(not std::isfinite(prepared_ratio) or not std::isfinite(rebuilt_ratio)
-       or prepared_ratio<=0.0 or rebuilt_ratio<=0.0)
+    Timing production = median_ms(original, selection);
+    Timing prepared_time = median_ms(prepared_work, selection);
+    Timing rebuilt_time = median_ms(rebuilt_work, selection);
+    double prepared_ratio = production.milliseconds / prepared_time.milliseconds;
+    double rebuilt_ratio = production.milliseconds / rebuilt_time.milliseconds;
+    if (not std::isfinite(prepared_ratio) or not std::isfinite(rebuilt_ratio) or prepared_ratio <= 0.0 or rebuilt_ratio <= 0.0)
         throw std::runtime_error("invalid dependency pruning speed ratio");
 
-    std::cout<<"DEPENDENCY_SKIP_COMPARE shape="<<shape
-             <<" d=4 f=3 queries="<<targets.size()
-             <<" production_median_ms="<<std::fixed<<std::setprecision(5)
-                <<production.milliseconds
-             <<" prepared_median_ms="<<prepared_time.milliseconds
-             <<" rebuilt_median_ms="<<rebuilt_time.milliseconds
-             <<" prepared_speedup="<<std::setprecision(3)<<prepared_ratio
-             <<" rebuilt_speedup="<<rebuilt_ratio
-             <<" production_iters="<<production.iterations
-             <<" prepared_iters="<<prepared_time.iterations
-             <<" rebuilt_iters="<<rebuilt_time.iterations
-             <<" samples="<<selection.samples
-             <<"\n";
-    std::cout<<"DEPENDENCY_SKIP_COMPARE: production is the certified-"
-                "containment reducer; prepared excludes dependency compilation"
-                " from the timed sweep, rebuilt includes it for every query."
-                " All three produce identical contracted domains and"
-                " separation results; no production code changed.\n";
+    std::cout << "DEPENDENCY_SKIP_COMPARE shape=" << shape
+              << " d=4 f=3 queries=" << targets.size()
+              << " production_median_ms=" << std::fixed << std::setprecision(5)
+              << production.milliseconds
+              << " prepared_median_ms=" << prepared_time.milliseconds
+              << " rebuilt_median_ms=" << rebuilt_time.milliseconds
+              << " prepared_speedup=" << std::setprecision(3) << prepared_ratio
+              << " rebuilt_speedup=" << rebuilt_ratio
+              << " production_iters=" << production.iterations
+              << " prepared_iters=" << prepared_time.iterations
+              << " rebuilt_iters=" << rebuilt_time.iterations
+              << " samples=" << selection.samples
+              << "\n";
+    std::cout << "DEPENDENCY_SKIP_COMPARE: production is the certified-"
+                 "containment reducer; prepared excludes dependency compilation"
+                 " from the timed sweep, rebuilt includes it for every query."
+                 " All three produce identical contracted domains and"
+                 " separation results; no production code changed.\n";
 }
 
 // Instrument the *current production P1 schedule*, not the historical
@@ -1616,310 +1650,303 @@ void compare_dependency_skip(Selection const& selection,
 // same contractor, but reports the number of validated interval-function
 // evaluations. Nothing in this profiler changes the production solver.
 struct ResidualShavingStatistics {
-    SizeType queries=0u;
-    SizeType separated=0u;
-    SizeType rounds=0u;
-    SizeType hull_calls=0u;
-    SizeType stopped_empty_hull=0u;
-    SizeType stopped_empty_box=0u;
-    SizeType stopped_threshold=0u;
-    SizeType guard_tests=0u;
-    SizeType guard_proofs=0u;
-    SizeType reused_proofs=0u;
-    SizeType unproved_outputs=0u;
-    SizeType unchanged_evaluations=0u;
-    SizeType changed_evaluations=0u;
-    double total_seconds=0.0;
-    double hull_seconds=0.0;
-    double guard_seconds=0.0;
-    double box_seconds=0.0;
+    SizeType queries = 0u;
+    SizeType separated = 0u;
+    SizeType rounds = 0u;
+    SizeType hull_calls = 0u;
+    SizeType stopped_empty_hull = 0u;
+    SizeType stopped_empty_box = 0u;
+    SizeType stopped_threshold = 0u;
+    SizeType guard_tests = 0u;
+    SizeType guard_proofs = 0u;
+    SizeType reused_proofs = 0u;
+    SizeType unproved_outputs = 0u;
+    SizeType unchanged_evaluations = 0u;
+    SizeType changed_evaluations = 0u;
+    double total_seconds = 0.0;
+    double hull_seconds = 0.0;
+    double guard_seconds = 0.0;
+    double box_seconds = 0.0;
     BoxCallStatistics all;
     std::vector<BoxCallStatistics> by_output;
     std::vector<BoxCallStatistics> by_variable;
     std::vector<BoxCallStatistics> by_pair;
-    std::array<SizeType,9u> histogram{};
-    std::array<SizeType,9u> unchanged_histogram{};
+    std::array<SizeType, 9u> histogram{};
+    std::array<SizeType, 9u> unchanged_histogram{};
 
-    void prepare(SizeType outputs,SizeType variables) {
+    void prepare(SizeType outputs, SizeType variables) {
         by_output.resize(outputs);
         by_variable.resize(variables);
-        by_pair.resize(outputs*variables);
+        by_pair.resize(outputs * variables);
     }
 
-    void record_box(SizeType i,SizeType j,SizeType variables,
-                    SizeType evaluations,Bool changed,Bool empty,
+    void record_box(SizeType i, SizeType j, SizeType variables,
+                    SizeType evaluations, Bool changed, Bool empty,
                     double seconds) {
-        if(evaluations>=histogram.size())
+        if (evaluations >= histogram.size())
             throw std::runtime_error("box_reduce used more than eight slices");
-        all.add(evaluations,changed,empty,seconds);
-        by_output[i].add(evaluations,changed,empty,seconds);
-        by_variable[j].add(evaluations,changed,empty,seconds);
-        by_pair[i*variables+j].add(evaluations,changed,empty,seconds);
+        all.add(evaluations, changed, empty, seconds);
+        by_output[i].add(evaluations, changed, empty, seconds);
+        by_variable[j].add(evaluations, changed, empty, seconds);
+        by_pair[i * variables + j].add(evaluations, changed, empty, seconds);
         ++histogram[evaluations];
-        if(changed) {
-            changed_evaluations+=evaluations;
+        if (changed) {
+            changed_evaluations += evaluations;
         } else {
-            unchanged_evaluations+=evaluations;
+            unchanged_evaluations += evaluations;
             ++unchanged_histogram[evaluations];
         }
     }
 
     void validate() const {
-        if(queries!=stopped_empty_hull+stopped_empty_box+stopped_threshold
-           or queries!=separated+stopped_threshold
-           or all.changed+all.unchanged!=all.calls
-           or all.zero_evaluations!=histogram[0]
-           or all.evaluations!=changed_evaluations+unchanged_evaluations)
+        if (queries != stopped_empty_hull + stopped_empty_box + stopped_threshold or queries != separated + stopped_threshold or all.changed + all.unchanged != all.calls or all.zero_evaluations != histogram[0] or all.evaluations != changed_evaluations + unchanged_evaluations)
             throw std::runtime_error("inconsistent residual summary");
-        SizeType histogram_calls=0u, histogram_evaluations=0u;
-        SizeType unchanged_histogram_calls=0u;
-        for(SizeType n=0u;n<histogram.size();++n) {
-            histogram_calls+=histogram[n];
-            histogram_evaluations+=n*histogram[n];
-            unchanged_histogram_calls+=unchanged_histogram[n];
-            if(unchanged_histogram[n]>histogram[n])
+        SizeType histogram_calls = 0u, histogram_evaluations = 0u;
+        SizeType unchanged_histogram_calls = 0u;
+        for (SizeType n = 0u; n < histogram.size(); ++n) {
+            histogram_calls += histogram[n];
+            histogram_evaluations += n * histogram[n];
+            unchanged_histogram_calls += unchanged_histogram[n];
+            if (unchanged_histogram[n] > histogram[n])
                 throw std::runtime_error("invalid unchanged residual histogram");
         }
-        if(histogram_calls!=all.calls
-           or histogram_evaluations!=all.evaluations
-           or unchanged_histogram_calls!=all.unchanged)
+        if (histogram_calls != all.calls or histogram_evaluations != all.evaluations or unchanged_histogram_calls != all.unchanged)
             throw std::runtime_error("invalid residual evaluation histogram");
-        for(auto const* group:{&by_output,&by_variable,&by_pair}) {
-            SizeType calls=0u,evals=0u,changed=0u,unchanged=0u;
-            SizeType emptied=0u,zero=0u;
-            for(auto const& r:*group) {
-                calls+=r.calls;
-                evals+=r.evaluations;
-                changed+=r.changed;
-                unchanged+=r.unchanged;
-                emptied+=r.emptied;
-                zero+=r.zero_evaluations;
+        for (const auto* group: {&by_output, &by_variable, &by_pair}) {
+            SizeType calls = 0u, evals = 0u, changed = 0u, unchanged = 0u;
+            SizeType emptied = 0u, zero = 0u;
+            for (const auto& r: *group) {
+                calls += r.calls;
+                evals += r.evaluations;
+                changed += r.changed;
+                unchanged += r.unchanged;
+                emptied += r.emptied;
+                zero += r.zero_evaluations;
             }
-            if(calls!=all.calls or evals!=all.evaluations
-               or changed!=all.changed or unchanged!=all.unchanged
-               or emptied!=all.emptied or zero!=all.zero_evaluations)
+            if (calls != all.calls or evals != all.evaluations or changed != all.changed or unchanged != all.unchanged or emptied != all.emptied or zero != all.zero_evaluations)
                 throw std::runtime_error("invalid residual group statistics");
         }
     }
 };
 
 void traced_reduce_residual(
-        ConstraintSolver const& solver,UpperBoxType& domain,
-        ValidatedVectorMultivariateFunction const& function,
-        ExactBoxType const& codomain,ResidualShavingStatistics& stats) {
-    using Clock=Bench::Clock;
-    auto elapsed=[](Clock::time_point begin) {
-        return Bench::elapsed_ns(begin,Clock::now())/1e9;
+    const ConstraintSolver& solver, UpperBoxType& domain,
+    const ValidatedVectorMultivariateFunction& function,
+    const ExactBoxType& codomain, ResidualShavingStatistics& stats) {
+    using Clock = Bench::Clock;
+    auto elapsed = [](Clock::time_point begin) {
+        return Bench::elapsed_ns(begin, Clock::now()) / 1e9;
     };
-    auto const begin=Clock::now();
+    const auto begin = Clock::now();
     ++stats.queries;
-    if(definitely(domain.is_empty())) {
+    if (definitely(domain.is_empty())) {
         ++stats.separated;
         ++stats.stopped_empty_hull;
-        stats.total_seconds+=elapsed(begin);
+        stats.total_seconds += elapsed(begin);
         return;
     }
 
-    const ExactDouble MINIMUM_REDUCTION=0.75_x;
-    std::vector<Bool> certified_satisfied(codomain.size(),false);
-    FloatDPUpperBound magnitude={0u,dp};
-    for(SizeType j=0u;j<domain.size();++j)
-        magnitude+=domain[j].width();
-    FloatDPUpperBound previous=magnitude;
+    const ExactDouble MINIMUM_REDUCTION = 0.75_x;
+    std::vector<Bool> certified_satisfied(codomain.size(), false);
+    FloatDPUpperBound magnitude = {0u, dp};
+    for (SizeType j = 0u; j < domain.size(); ++j)
+        magnitude += domain[j].width();
+    FloatDPUpperBound previous = magnitude;
 
     do {
         ++stats.rounds;
         ++stats.hull_calls;
-        auto const hstart=Clock::now();
-        solver.hull_reduce(domain,function,codomain);
-        stats.hull_seconds+=elapsed(hstart);
-        if(definitely(domain.is_empty())) {
+        const auto hstart = Clock::now();
+        solver.hull_reduce(domain, function, codomain);
+        stats.hull_seconds += elapsed(hstart);
+        if (definitely(domain.is_empty())) {
             ++stats.separated;
             ++stats.stopped_empty_hull;
-            stats.total_seconds+=elapsed(begin);
+            stats.total_seconds += elapsed(begin);
             return;
         }
 
-        for(SizeType i=0u;i<codomain.size();++i) {
-            if(certified_satisfied[i]) {
+        for (SizeType i = 0u; i < codomain.size(); ++i) {
+            if (certified_satisfied[i]) {
                 ++stats.reused_proofs;
                 continue;
             }
             ++stats.guard_tests;
-            auto const gstart=Clock::now();
-            Bool const proved=definitely(subset(
-                Ariadne::apply(function[i],domain),codomain[i]));
-            stats.guard_seconds+=elapsed(gstart);
-            if(proved) {
-                certified_satisfied[i]=true;
+            const auto gstart = Clock::now();
+            const Bool proved = definitely(subset(
+                Ariadne::apply(function[i], domain), codomain[i]));
+            stats.guard_seconds += elapsed(gstart);
+            if (proved) {
+                certified_satisfied[i] = true;
                 ++stats.guard_proofs;
                 continue;
             }
 
             ++stats.unproved_outputs;
-            for(SizeType j=0u;j<domain.size();++j) {
-                UpperIntervalType const before=domain[j];
-                SizeType evaluations=0u;
-                auto const bstart=Clock::now();
+            for (SizeType j = 0u; j < domain.size(); ++j) {
+                const UpperIntervalType before = domain[j];
+                SizeType evaluations = 0u;
+                const auto bstart = Clock::now();
                 solver.box_reduce(
-                    domain,function[i],codomain[i],j,evaluations);
-                double const seconds=elapsed(bstart);
-                stats.box_seconds+=seconds;
-                Bool const empty=definitely(domain.is_empty());
-                stats.record_box(i,j,domain.size(),evaluations,
-                                 not same(before,domain[j]),empty,seconds);
-                if(empty) {
+                    domain, function[i], codomain[i], j, evaluations);
+                const double seconds = elapsed(bstart);
+                stats.box_seconds += seconds;
+                const Bool empty = definitely(domain.is_empty());
+                stats.record_box(i, j, domain.size(), evaluations,
+                                 not same(before, domain[j]), empty, seconds);
+                if (empty) {
                     ++stats.separated;
                     ++stats.stopped_empty_box;
-                    stats.total_seconds+=elapsed(begin);
+                    stats.total_seconds += elapsed(begin);
                     return;
                 }
             }
         }
-        previous=magnitude;
-        magnitude=0u;
-        for(SizeType j=0u;j<domain.size();++j)
-            magnitude+=domain[j].width();
-    } while(magnitude.raw()
-            < mul(near,previous.raw(),FloatDP(MINIMUM_REDUCTION,dp)));
+        previous = magnitude;
+        magnitude = 0u;
+        for (SizeType j = 0u; j < domain.size(); ++j)
+            magnitude += domain[j].width();
+    } while (magnitude.raw() < mul(near, previous.raw(), FloatDP(MINIMUM_REDUCTION, dp)));
     ++stats.stopped_threshold;
-    stats.total_seconds+=elapsed(begin);
+    stats.total_seconds += elapsed(begin);
 }
 
-void profile_residual_shaving(Selection const& selection,
-                              std::string const& shape) {
-    SolverProblem problem=make_problem(shape);
-    auto records=read_adaptive_trace(selection.trace_prefix,shape);
+void profile_residual_shaving(const Selection& selection,
+                              const std::string& shape) {
+    SolverProblem problem = make_problem(shape);
+    auto records = read_adaptive_trace(selection.trace_prefix, shape);
     ConstraintSolver solver;
     ResidualShavingStatistics stats;
-    stats.prepare(problem.function.result_size(),problem.initial_domain.size());
-    for(SizeType q=0u;q<records.size();++q) {
-        auto const& record=records[q];
-        ExactBoxType codomain=problem.codomains.front();
-        for(SizeType j=0u;j<4u;++j) codomain[j]=record.box[j];
+    stats.prepare(problem.function.result_size(), problem.initial_domain.size());
+    for (SizeType q = 0u; q < records.size(); ++q) {
+        const auto& record = records[q];
+        ExactBoxType codomain = problem.codomains.front();
+        for (SizeType j = 0u; j < 4u; ++j)
+            codomain[j] = record.box[j];
 
-        UpperBoxType production=problem.initial_domain;
-        solver.reduce(production,problem.function,codomain);
-        UpperBoxType traced=problem.initial_domain;
-        traced_reduce_residual(solver,traced,problem.function,codomain,stats);
-        if(not same(production,traced))
+        UpperBoxType production = problem.initial_domain;
+        solver.reduce(production, problem.function, codomain);
+        UpperBoxType traced = problem.initial_domain;
+        traced_reduce_residual(solver, traced, problem.function, codomain, stats);
+        if (not same(production, traced))
             throw std::runtime_error(
                 "residual shaving instrumentation differs from production"
-                " shape="+shape+" query="+std::to_string(q));
+                " shape=" +
+                shape + " query=" + std::to_string(q));
 
-        UpperBoxType legacy=problem.initial_domain;
-        reduce_full_scan_reference(solver,legacy,problem.function,codomain);
-        if(not same(legacy,traced))
+        UpperBoxType legacy = problem.initial_domain;
+        reduce_full_scan_reference(solver, legacy, problem.function, codomain);
+        if (not same(legacy, traced))
             throw std::runtime_error(
                 "residual shaving differs from legacy full scan"
-                " shape="+shape+" query="+std::to_string(q));
-        if(definitely(traced.is_empty())!=record.separated)
+                " shape=" +
+                shape + " query=" + std::to_string(q));
+        if (definitely(traced.is_empty()) != record.separated)
             throw std::runtime_error(
                 "residual shaving disagrees with paving separation trace"
-                " shape="+shape+" query="+std::to_string(q));
+                " shape=" +
+                shape + " query=" + std::to_string(q));
     }
     stats.validate();
 
-    std::cout<<"RESIDUAL_SHAVING_VERIFIED shape="<<shape
-             <<" d=4 f=3 queries="<<stats.queries
-             <<" separated="<<stats.separated
-             <<" rounds="<<stats.rounds
-             <<" hull_calls="<<stats.hull_calls
-             <<" guard_tests="<<stats.guard_tests
-             <<" guard_proofs="<<stats.guard_proofs
-             <<" reused_proofs="<<stats.reused_proofs
-             <<" unproved_outputs="<<stats.unproved_outputs
-             <<" box_calls="<<stats.all.calls
-             <<" box_evaluations="<<stats.all.evaluations
-             <<" box_changed="<<stats.all.changed
-             <<" box_unchanged="<<stats.all.unchanged
-             <<" box_empty="<<stats.all.emptied
-             <<"\n";
-    if(selection.verify_only) return;
+    std::cout << "RESIDUAL_SHAVING_VERIFIED shape=" << shape
+              << " d=4 f=3 queries=" << stats.queries
+              << " separated=" << stats.separated
+              << " rounds=" << stats.rounds
+              << " hull_calls=" << stats.hull_calls
+              << " guard_tests=" << stats.guard_tests
+              << " guard_proofs=" << stats.guard_proofs
+              << " reused_proofs=" << stats.reused_proofs
+              << " unproved_outputs=" << stats.unproved_outputs
+              << " box_calls=" << stats.all.calls
+              << " box_evaluations=" << stats.all.evaluations
+              << " box_changed=" << stats.all.changed
+              << " box_unchanged=" << stats.all.unchanged
+              << " box_empty=" << stats.all.emptied
+              << "\n";
+    if (selection.verify_only)
+        return;
 
-    std::cout<<"RESIDUAL_SHAVING_TIMES shape="<<shape
-             <<" instrumented_total_ms="<<std::fixed<<std::setprecision(4)
-                <<1000.0*stats.total_seconds
-             <<" hull_ms="<<1000.0*stats.hull_seconds
-             <<" guard_ms="<<1000.0*stats.guard_seconds
-             <<" box_ms="<<1000.0*stats.box_seconds
-             <<" other_ms="<<1000.0*(
-                stats.total_seconds-stats.hull_seconds
-                -stats.guard_seconds-stats.box_seconds)
-             <<" unchanged_box_evaluations="<<stats.unchanged_evaluations
-             <<" changed_box_evaluations="<<stats.changed_evaluations
-             <<"\n";
+    std::cout << "RESIDUAL_SHAVING_TIMES shape=" << shape
+              << " instrumented_total_ms=" << std::fixed << std::setprecision(4)
+              << 1000.0 * stats.total_seconds
+              << " hull_ms=" << 1000.0 * stats.hull_seconds
+              << " guard_ms=" << 1000.0 * stats.guard_seconds
+              << " box_ms=" << 1000.0 * stats.box_seconds
+              << " other_ms=" << 1000.0 * (stats.total_seconds - stats.hull_seconds - stats.guard_seconds - stats.box_seconds)
+              << " unchanged_box_evaluations=" << stats.unchanged_evaluations
+              << " changed_box_evaluations=" << stats.changed_evaluations
+              << "\n";
 
-    std::cout<<"RESIDUAL_SHAVING_EVAL_HIST shape="<<shape;
-    for(SizeType n=0u;n<stats.histogram.size();++n)
-        std::cout<<" eval_"<<n<<"="<<stats.histogram[n];
-    std::cout<<"\n";
+    std::cout << "RESIDUAL_SHAVING_EVAL_HIST shape=" << shape;
+    for (SizeType n = 0u; n < stats.histogram.size(); ++n)
+        std::cout << " eval_" << n << "=" << stats.histogram[n];
+    std::cout << "\n";
 
-    std::cout<<"RESIDUAL_SHAVING_UNCHANGED_HIST shape="<<shape;
-    for(SizeType n=0u;n<stats.unchanged_histogram.size();++n)
-        std::cout<<" eval_"<<n<<"="<<stats.unchanged_histogram[n];
-    std::cout<<"\n";
+    std::cout << "RESIDUAL_SHAVING_UNCHANGED_HIST shape=" << shape;
+    for (SizeType n = 0u; n < stats.unchanged_histogram.size(); ++n)
+        std::cout << " eval_" << n << "=" << stats.unchanged_histogram[n];
+    std::cout << "\n";
 
-    auto print_group=[&](char const* name,SizeType index,
-                         BoxCallStatistics const& s) {
-        std::cout<<"RESIDUAL_SHAVING_GROUP shape="<<shape
-                 <<" group="<<name<<" index="<<index
-                 <<" calls="<<s.calls
-                 <<" evaluations="<<s.evaluations
-                 <<" changed="<<s.changed
-                 <<" unchanged="<<s.unchanged
-                 <<" empty="<<s.emptied
-                 <<" zero_evaluations="<<s.zero_evaluations
-                 <<" elapsed_ms="<<std::fixed<<std::setprecision(4)
-                    <<1000.0*s.seconds<<"\n";
+    auto print_group = [&](const char* name, SizeType index,
+                           const BoxCallStatistics& s) {
+        std::cout << "RESIDUAL_SHAVING_GROUP shape=" << shape
+                  << " group=" << name << " index=" << index
+                  << " calls=" << s.calls
+                  << " evaluations=" << s.evaluations
+                  << " changed=" << s.changed
+                  << " unchanged=" << s.unchanged
+                  << " empty=" << s.emptied
+                  << " zero_evaluations=" << s.zero_evaluations
+                  << " elapsed_ms=" << std::fixed << std::setprecision(4)
+                  << 1000.0 * s.seconds << "\n";
     };
-    for(SizeType i=0u;i<stats.by_output.size();++i) {
-        if(stats.by_output[i].calls!=0u)
-            print_group("output",i,stats.by_output[i]);
+    for (SizeType i = 0u; i < stats.by_output.size(); ++i) {
+        if (stats.by_output[i].calls != 0u)
+            print_group("output", i, stats.by_output[i]);
     }
-    for(SizeType j=0u;j<stats.by_variable.size();++j)
-        print_group("variable",j,stats.by_variable[j]);
+    for (SizeType j = 0u; j < stats.by_variable.size(); ++j)
+        print_group("variable", j, stats.by_variable[j]);
 
     // Rank output/variable pairs by measured box-contractor time.
     // This is an instrumented single replay, *not* a calibrated speedup.
     std::vector<SizeType> ranking;
     ranking.reserve(stats.by_pair.size());
-    for(SizeType pair=0u;pair<stats.by_pair.size();++pair) {
-        if(stats.by_pair[pair].calls!=0u) ranking.push_back(pair);
+    for (SizeType pair = 0u; pair < stats.by_pair.size(); ++pair) {
+        if (stats.by_pair[pair].calls != 0u)
+            ranking.push_back(pair);
     }
-    std::sort(ranking.begin(),ranking.end(),
-        [&](SizeType lhs_index,SizeType rhs_index) {
-            if(stats.by_pair[lhs_index].seconds
-               !=stats.by_pair[rhs_index].seconds)
-                return stats.by_pair[lhs_index].seconds
-                     > stats.by_pair[rhs_index].seconds;
-            return lhs_index<rhs_index;
-        });
-    SizeType const variables=problem.initial_domain.size();
-    SizeType const limit=std::min(ranking.size(),SizeType(12u));
-    for(SizeType rank=0u;rank<limit;++rank) {
-        SizeType const pair=ranking[rank];
-        auto const& s=stats.by_pair[pair];
-        std::cout<<"RESIDUAL_SHAVING_HOT_PAIR shape="<<shape
-                 <<" rank="<<(rank+1u)
-                 <<" output="<<(pair/variables)
-                 <<" variable="<<(pair%variables)
-                 <<" calls="<<s.calls
-                 <<" evaluations="<<s.evaluations
-                 <<" changed="<<s.changed
-                 <<" unchanged="<<s.unchanged
-                 <<" empty="<<s.emptied
-                 <<" zero_evaluations="<<s.zero_evaluations
-                 <<" elapsed_ms="<<std::fixed<<std::setprecision(4)
-                    <<1000.0*s.seconds
-                 <<"\n";
+    std::sort(ranking.begin(), ranking.end(),
+              [&](SizeType lhs_index, SizeType rhs_index) {
+                  if (stats.by_pair[lhs_index].seconds != stats.by_pair[rhs_index].seconds)
+                      return stats.by_pair[lhs_index].seconds > stats.by_pair[rhs_index].seconds;
+                  return lhs_index < rhs_index;
+              });
+    const SizeType variables = problem.initial_domain.size();
+    const SizeType limit = std::min(ranking.size(), SizeType(12u));
+    for (SizeType rank = 0u; rank < limit; ++rank) {
+        const SizeType pair = ranking[rank];
+        const auto& s = stats.by_pair[pair];
+        std::cout << "RESIDUAL_SHAVING_HOT_PAIR shape=" << shape
+                  << " rank=" << (rank + 1u)
+                  << " output=" << (pair / variables)
+                  << " variable=" << (pair % variables)
+                  << " calls=" << s.calls
+                  << " evaluations=" << s.evaluations
+                  << " changed=" << s.changed
+                  << " unchanged=" << s.unchanged
+                  << " empty=" << s.emptied
+                  << " zero_evaluations=" << s.zero_evaluations
+                  << " elapsed_ms=" << std::fixed << std::setprecision(4)
+                  << 1000.0 * s.seconds
+                  << "\n";
     }
-    std::cout<<"RESIDUAL_SHAVING_NOTE: instrumented P1 replay only;"
-                " timings include profiling overhead. Histograms count"
-                " actual interval-function evaluations from box_reduce;"
-                " unchanged does not prove a call was dispensable."
-                " Full domain equality with production and the frozen"
-                " legacy reference was checked for every query.\n";
+    std::cout << "RESIDUAL_SHAVING_NOTE: instrumented P1 replay only;"
+                 " timings include profiling overhead. Histograms count"
+                 " actual interval-function evaluations from box_reduce;"
+                 " unchanged does not prove a call was dispensable."
+                 " Full domain equality with production and the frozen"
+                 " legacy reference was checked for every query.\n";
 }
 
 // P5, benchmark-only: a sound boundary contractor using a dyadic
@@ -1933,18 +1960,18 @@ struct AdaptiveShavingSettings {
 };
 
 struct AdaptiveShavingStatistics {
-    SizeType calls=0u;
-    SizeType evaluations=0u;
-    SizeType changed_calls=0u;
-    SizeType emptied_calls=0u;
-    SizeType rejected_cells=0u;
-    SizeType unresolved_leaves=0u;
-    SizeType budget_stops=0u;
-    SizeType depth_stops=0u;
-    SizeType certified_outputs=0u;
-    SizeType rounds=0u;
-    SizeType cell_visits=0u;
-    SizeType cache_hits=0u;
+    SizeType calls = 0u;
+    SizeType evaluations = 0u;
+    SizeType changed_calls = 0u;
+    SizeType emptied_calls = 0u;
+    SizeType rejected_cells = 0u;
+    SizeType unresolved_leaves = 0u;
+    SizeType budget_stops = 0u;
+    SizeType depth_stops = 0u;
+    SizeType certified_outputs = 0u;
+    SizeType rounds = 0u;
+    SizeType cell_visits = 0u;
+    SizeType cache_hits = 0u;
 };
 
 // The production solver's affine() interpolation helper is local to
@@ -1952,101 +1979,116 @@ struct AdaptiveShavingStatistics {
 // Keep the same arithmetic here; do not add a shared benchmark header.
 template<class X>
 inline Approximation<X> adaptive_affine(
-        Approximation<X> l,Approximation<X> u,Nat i,Nat n) {
-    return (l*(n-i)+u*i)/n;
+    Approximation<X> l, Approximation<X> u, Nat i, Nat n) {
+    return (l * (n - i) + u * i) / n;
 }
 
 Bool adaptive_box_reduce(UpperBoxType& domain,
-                         ValidatedScalarMultivariateFunction const& function,
-                         ExactIntervalType const& bounds,SizeType variable,
-                         AdaptiveShavingSettings const& settings,
-                         AdaptiveShavingStatistics* stats=nullptr,
-                         bool reuse_evaluations=false) {
-    if(stats) ++stats->calls;
-    if(definitely(domain.is_empty())) return true;
-    if(definitely(domain[variable].lower_bound()
-                  >=domain[variable].upper_bound())) return false;
+                         const ValidatedScalarMultivariateFunction& function,
+                         const ExactIntervalType& bounds, SizeType variable,
+                         const AdaptiveShavingSettings& settings,
+                         AdaptiveShavingStatistics* stats = nullptr,
+                         bool reuse_evaluations = false) {
+    if (stats)
+        ++stats->calls;
+    if (definitely(domain.is_empty()))
+        return true;
+    if (definitely(domain[variable].lower_bound() >= domain[variable].upper_bound()))
+        return false;
 
-    UpperIntervalType const original=domain[variable];
-    FloatDPApproximation const lower=original.lower_bound();
-    FloatDPApproximation const upper=original.upper_bound();
-    UpperIntervalType narrowed=original;
-    struct Cell { unsigned depth; unsigned index; };
-    struct CachedProof { unsigned depth; unsigned index; bool disjoint; };
+    const UpperIntervalType original = domain[variable];
+    const FloatDPApproximation lower = original.lower_bound();
+    const FloatDPApproximation upper = original.upper_bound();
+    UpperIntervalType narrowed = original;
+    struct Cell {
+        unsigned depth;
+        unsigned index;
+    };
+    struct CachedProof {
+        unsigned depth;
+        unsigned index;
+        bool disjoint;
+    };
     // Per-box_reduce cache only: the other input coordinates are fixed
     // throughout these two boundary scans, but change in later calls.
     std::vector<CachedProof> cache;
-    if(reuse_evaluations)
-        cache.reserve(std::min(settings.evaluation_budget,64u));
-    bool entire_domain_excluded=false;
+    if (reuse_evaluations)
+        cache.reserve(std::min(settings.evaluation_budget, 64u));
+    bool entire_domain_excluded = false;
 
-    auto scan=[&](bool from_lower,unsigned budget)->bool {
-        std::vector<Cell> todo({Cell{0u,0u}});
-        bool unresolved=false;
-        unsigned used=0u;
-        while(not todo.empty() and used<budget) {
-            Cell const cell=todo.back();
+    auto scan = [&](bool from_lower, unsigned budget) -> bool {
+        std::vector<Cell> todo({
+            Cell{0u, 0u}
+        });
+        bool unresolved = false;
+        unsigned used = 0u;
+        while (not todo.empty() and used < budget) {
+            const Cell cell = todo.back();
             todo.pop_back();
-            Nat const parts=static_cast<Nat>(1u<<cell.depth);
-            Nat const index=static_cast<Nat>(cell.index);
-            ExactIntervalType const interval(
-                cast_exact(adaptive_affine(lower,upper,index,parts)),
-                cast_exact(adaptive_affine(lower,upper,index+1u,parts)));
+            const Nat parts = static_cast<Nat>(1u << cell.depth);
+            const Nat index = static_cast<Nat>(cell.index);
+            const ExactIntervalType interval(
+                cast_exact(adaptive_affine(lower, upper, index, parts)),
+                cast_exact(adaptive_affine(lower, upper, index + 1u, parts)));
             ++used;
-            if(stats) ++stats->cell_visits;
-            bool disjoint_proof=false;
-            bool cache_hit=false;
-            if(reuse_evaluations) {
-                for(CachedProof const& proof:cache) {
-                    if(proof.depth==cell.depth and proof.index==cell.index) {
-                        disjoint_proof=proof.disjoint;
-                        cache_hit=true;
+            if (stats)
+                ++stats->cell_visits;
+            bool disjoint_proof = false;
+            bool cache_hit = false;
+            if (reuse_evaluations) {
+                for (const CachedProof& proof: cache) {
+                    if (proof.depth == cell.depth and proof.index == cell.index) {
+                        disjoint_proof = proof.disjoint;
+                        cache_hit = true;
                         break;
                     }
                 }
             }
-            if(cache_hit) {
-                if(stats) ++stats->cache_hits;
+            if (cache_hit) {
+                if (stats)
+                    ++stats->cache_hits;
             } else {
-                UpperBoxType slice=domain;
-                slice[variable]=interval;
-                if(stats) ++stats->evaluations;
-                disjoint_proof=definitely(disjoint(
-                    Ariadne::apply(function,slice),bounds));
-                if(reuse_evaluations)
-                    cache.push_back({cell.depth,cell.index,disjoint_proof});
+                UpperBoxType slice = domain;
+                slice[variable] = interval;
+                if (stats)
+                    ++stats->evaluations;
+                disjoint_proof = definitely(disjoint(
+                    Ariadne::apply(function, slice), bounds));
+                if (reuse_evaluations)
+                    cache.push_back({cell.depth, cell.index, disjoint_proof});
             }
-            if(disjoint_proof) {
-                if(stats) ++stats->rejected_cells;
-                if(from_lower) {
+            if (disjoint_proof) {
+                if (stats)
+                    ++stats->rejected_cells;
+                if (from_lower) {
                     narrowed.set_lower_bound(interval.upper_bound());
                 } else {
                     narrowed.set_upper_bound(interval.lower_bound());
                 }
                 continue;
             }
-            if(cell.depth<settings.max_depth) {
-                unsigned const child_depth=cell.depth+1u;
-                unsigned const first=cell.index*2u;
+            if (cell.depth < settings.max_depth) {
+                const unsigned child_depth = cell.depth + 1u;
+                const unsigned first = cell.index * 2u;
                 // The last appended cell is processed first, preserving
                 // contiguous left-to-right or right-to-left exploration.
-                if(from_lower) {
-                    todo.push_back({child_depth,first+1u});
-                    todo.push_back({child_depth,first});
+                if (from_lower) {
+                    todo.push_back({child_depth, first + 1u});
+                    todo.push_back({child_depth, first});
                 } else {
-                    todo.push_back({child_depth,first});
-                    todo.push_back({child_depth,first+1u});
+                    todo.push_back({child_depth, first});
+                    todo.push_back({child_depth, first + 1u});
                 }
             } else {
-                unresolved=true;
-                if(stats) {
+                unresolved = true;
+                if (stats) {
                     ++stats->unresolved_leaves;
                     ++stats->depth_stops;
                 }
                 break;
             }
         }
-        if(not todo.empty() and used==budget and stats)
+        if (not todo.empty() and used == budget and stats)
             ++stats->budget_stops;
         // No unresolved leaf and nothing left on the stack means
         // the entire original interval has been certified excluded.
@@ -2054,95 +2096,100 @@ Bool adaptive_box_reduce(UpperBoxType& domain,
     };
 
     // A symmetric budget ensures neither boundary starves the other.
-    unsigned const left_budget=(settings.evaluation_budget+1u)/2u;
-    unsigned const right_budget=settings.evaluation_budget-left_budget;
-    entire_domain_excluded=scan(true,left_budget);
-    if(not entire_domain_excluded)
-        entire_domain_excluded=scan(false,right_budget);
+    const unsigned left_budget = (settings.evaluation_budget + 1u) / 2u;
+    const unsigned right_budget = settings.evaluation_budget - left_budget;
+    entire_domain_excluded = scan(true, left_budget);
+    if (not entire_domain_excluded)
+        entire_domain_excluded = scan(false, right_budget);
 
-    if(entire_domain_excluded or definitely(narrowed.is_empty())) {
-        domain[variable]=ExactIntervalType(+inf,-inf);
-        if(stats) {
+    if (entire_domain_excluded or definitely(narrowed.is_empty())) {
+        domain[variable] = ExactIntervalType(+inf, -inf);
+        if (stats) {
             ++stats->changed_calls;
             ++stats->emptied_calls;
         }
         return true;
     }
-    domain[variable]=narrowed;
-    if(stats and not same(original,narrowed))
+    domain[variable] = narrowed;
+    if (stats and not same(original, narrowed))
         ++stats->changed_calls;
     return false;
 }
 
 Bool reduce_adaptive_shaving(
-        ConstraintSolver const& solver,UpperBoxType& domain,
-        ValidatedVectorMultivariateFunction const& function,
-        ExactBoxType const& codomain,
-        AdaptiveShavingSettings const& settings,
-        AdaptiveShavingStatistics* stats=nullptr,
-        bool reuse_evaluations=false) {
-    const ExactDouble MINIMUM_REDUCTION=0.75_x;
-    if(definitely(domain.is_empty())) return true;
-    std::vector<Bool> certified(codomain.size(),false);
-    FloatDPUpperBound magnitude={0u,dp};
-    for(SizeType j=0u;j<domain.size();++j)
-        magnitude+=domain[j].width();
-    FloatDPUpperBound previous=magnitude;
+    const ConstraintSolver& solver, UpperBoxType& domain,
+    const ValidatedVectorMultivariateFunction& function,
+    const ExactBoxType& codomain,
+    const AdaptiveShavingSettings& settings,
+    AdaptiveShavingStatistics* stats = nullptr,
+    bool reuse_evaluations = false) {
+    const ExactDouble MINIMUM_REDUCTION = 0.75_x;
+    if (definitely(domain.is_empty()))
+        return true;
+    std::vector<Bool> certified(codomain.size(), false);
+    FloatDPUpperBound magnitude = {0u, dp};
+    for (SizeType j = 0u; j < domain.size(); ++j)
+        magnitude += domain[j].width();
+    FloatDPUpperBound previous = magnitude;
 
     do {
-        if(stats) ++stats->rounds;
-        solver.hull_reduce(domain,function,codomain);
-        if(definitely(domain.is_empty())) return true;
-        for(SizeType i=0u;i<codomain.size();++i) {
-            if(certified[i]) continue;
-            if(definitely(subset(
-                    Ariadne::apply(function[i],domain),codomain[i]))) {
-                certified[i]=true;
-                if(stats) ++stats->certified_outputs;
+        if (stats)
+            ++stats->rounds;
+        solver.hull_reduce(domain, function, codomain);
+        if (definitely(domain.is_empty()))
+            return true;
+        for (SizeType i = 0u; i < codomain.size(); ++i) {
+            if (certified[i])
+                continue;
+            if (definitely(subset(
+                    Ariadne::apply(function[i], domain), codomain[i]))) {
+                certified[i] = true;
+                if (stats)
+                    ++stats->certified_outputs;
                 continue;
             }
-            for(SizeType j=0u;j<domain.size();++j) {
-                if(adaptive_box_reduce(
-                        domain,function[i],codomain[i],j,settings,stats,
+            for (SizeType j = 0u; j < domain.size(); ++j) {
+                if (adaptive_box_reduce(
+                        domain, function[i], codomain[i], j, settings, stats,
                         reuse_evaluations))
                     return true;
             }
         }
-        previous=magnitude;
-        magnitude=0u;
-        for(SizeType j=0u;j<domain.size();++j)
-            magnitude+=domain[j].width();
-    } while(magnitude.raw()
-            < mul(near,previous.raw(),FloatDP(MINIMUM_REDUCTION,dp)));
+        previous = magnitude;
+        magnitude = 0u;
+        for (SizeType j = 0u; j < domain.size(); ++j)
+            magnitude += domain[j].width();
+    } while (magnitude.raw() < mul(near, previous.raw(), FloatDP(MINIMUM_REDUCTION, dp)));
     return false;
 }
 
 struct AdaptiveComparison {
-    SizeType exactly_same=0u;
-    SizeType stronger=0u;
-    SizeType weaker=0u;
-    SizeType incomparable=0u;
+    SizeType exactly_same = 0u;
+    SizeType stronger = 0u;
+    SizeType weaker = 0u;
+    SizeType incomparable = 0u;
     // Actual set relations, treating all empty representations as equal.
-    SizeType set_equal=0u;
-    SizeType set_stronger=0u;
-    SizeType set_weaker=0u;
-    SizeType set_incomparable=0u;
-    SizeType candidate_only_empty=0u;
-    SizeType production_only_empty=0u;
-    SizeType both_empty=0u;
-    SizeType feasible_witnesses=0u;
+    SizeType set_equal = 0u;
+    SizeType set_stronger = 0u;
+    SizeType set_weaker = 0u;
+    SizeType set_incomparable = 0u;
+    SizeType candidate_only_empty = 0u;
+    SizeType production_only_empty = 0u;
+    SizeType both_empty = 0u;
+    SizeType feasible_witnesses = 0u;
     AdaptiveShavingStatistics activity;
 };
 
-void compare_adaptive_shaving(Selection const& selection,
-                              std::string const& shape) {
-    SolverProblem problem=make_problem(shape);
-    auto const records=read_adaptive_trace(selection.trace_prefix,shape);
+void compare_adaptive_shaving(const Selection& selection,
+                              const std::string& shape) {
+    SolverProblem problem = make_problem(shape);
+    const auto records = read_adaptive_trace(selection.trace_prefix, shape);
     std::vector<ExactBoxType> codomains;
     codomains.reserve(records.size());
-    for(auto const& record:records) {
-        ExactBoxType codomain=problem.codomains.front();
-        for(SizeType i=0u;i<4u;++i) codomain[i]=record.box[i];
+    for (const auto& record: records) {
+        ExactBoxType codomain = problem.codomains.front();
+        for (SizeType i = 0u; i < 4u; ++i)
+            codomain[i] = record.box[i];
         codomains.push_back(std::move(codomain));
     }
 
@@ -2150,641 +2197,621 @@ void compare_adaptive_shaving(Selection const& selection,
     // paving separation bit and retain one exact ground-truth result per box.
     EllipsoidAuditStatistics audit;
     std::vector<ExactEllipsoidMinimum> oracle;
-    if(shape=="rotated-ellipsoid") {
+    if (shape == "rotated-ellipsoid") {
         oracle.reserve(records.size());
-        for(SizeType q=0u;q<records.size();++q) {
-            auto minimum=exact_rotated_ellipsoid_minimum(records[q].endpoints);
-            audit.true_empty+=static_cast<SizeType>(minimum.empty());
-            if(records[q].separated and not minimum.empty()) {
+        for (SizeType q = 0u; q < records.size(); ++q) {
+            auto minimum = exact_rotated_ellipsoid_minimum(records[q].endpoints);
+            audit.true_empty += static_cast<SizeType>(minimum.empty());
+            if (records[q].separated and not minimum.empty()) {
                 ++audit.baseline_false_positive;
-                std::cout<<"AUDIT_ELLIPSOID_BASELINE_INVALID query="<<q
-                         <<" min_Q="<<minimum.minimum
-                         <<" feasible_point="
-                         <<exact_witness_string(minimum.witness)<<"\n";
+                std::cout << "AUDIT_ELLIPSOID_BASELINE_INVALID query=" << q
+                          << " min_Q=" << minimum.minimum
+                          << " feasible_point="
+                          << exact_witness_string(minimum.witness) << "\n";
             }
             oracle.push_back(std::move(minimum));
         }
     }
 
     ConstraintSolver solver;
-    AdaptiveShavingSettings const settings[]={
-        {selection.adaptive_depth,selection.adaptive_budget},
-        {selection.adaptive_depth,selection.adaptive_resolution_budget}
+    const AdaptiveShavingSettings settings[] = {
+        {selection.adaptive_depth,            selection.adaptive_budget},
+        {selection.adaptive_depth, selection.adaptive_resolution_budget}
     };
-    char const* labels[]={"budget","resolution"};
+    const char* labels[] = {"budget", "resolution"};
     AdaptiveComparison comparisons[2];
-    SizeType production_separated=0u;
+    SizeType production_separated = 0u;
     IncomparableAuditStatistics incomparables;
     // production, adaptive budget, adaptive resolution.
-    std::array<CompleteContractionAuditStatistics,3u> full_audits;
-    for(SizeType q=0u;q<records.size();++q) {
-        UpperBoxType production=problem.initial_domain;
-        solver.reduce(production,problem.function,codomains[q]);
-        UpperBoxType legacy=problem.initial_domain;
-        reduce_full_scan_reference(solver,legacy,problem.function,codomains[q]);
-        if(not same(production,legacy))
+    std::array<CompleteContractionAuditStatistics, 3u> full_audits;
+    for (SizeType q = 0u; q < records.size(); ++q) {
+        UpperBoxType production = problem.initial_domain;
+        solver.reduce(production, problem.function, codomains[q]);
+        UpperBoxType legacy = problem.initial_domain;
+        reduce_full_scan_reference(solver, legacy, problem.function, codomains[q]);
+        if (not same(production, legacy))
             throw std::runtime_error(
                 "production differs from frozen full-scan"
-                " shape="+shape+" query="+std::to_string(q));
-        Bool const empty=definitely(production.is_empty());
-        if(empty!=records[q].separated)
+                " shape=" +
+                shape + " query=" + std::to_string(q));
+        const Bool empty = definitely(production.is_empty());
+        if (empty != records[q].separated)
             throw std::runtime_error(
                 "baseline differs from exported paving separation"
-                " shape="+shape+" query="+std::to_string(q));
-        production_separated+=static_cast<SizeType>(empty);
-        if(selection.audit_all_ellipsoid_contractions)
+                " shape=" +
+                shape + " query=" + std::to_string(q));
+        production_separated += static_cast<SizeType>(empty);
+        if (selection.audit_all_ellipsoid_contractions)
             audit_all_exact_ellipsoid_contraction(
-                q,"production",records[q],oracle[q],production,
+                q, "production", records[q], oracle[q], production,
                 full_audits[0]);
 
         // The centre is a known feasible point of all five geometries,
         // but is a witness for this *query* only if validated evaluation
         // proves its entire image lies within the query codomain.
-        UpperBoxType const witness=ExactBoxType({
-            {0.5_x,0.5_x},{0.5_x,0.5_x},
-            {0.5_x,0.5_x},{0.5_x,0.5_x}
+        const UpperBoxType witness = ExactBoxType({
+            {0.5_x, 0.5_x},
+            {0.5_x, 0.5_x},
+            {0.5_x, 0.5_x},
+            {0.5_x, 0.5_x}
         });
-        bool verified_witness=true;
-        for(SizeType i=0u;i<codomains[q].size();++i) {
-            if(not definitely(subset(
-                    Ariadne::apply(problem.function[i],witness),
+        bool verified_witness = true;
+        for (SizeType i = 0u; i < codomains[q].size(); ++i) {
+            if (not definitely(subset(
+                    Ariadne::apply(problem.function[i], witness),
                     codomains[q][i]))) {
-                verified_witness=false;
+                verified_witness = false;
                 break;
             }
         }
 
-        for(unsigned method=0u;method!=2u;++method) {
-            AdaptiveComparison& result=comparisons[method];
-            UpperBoxType candidate=problem.initial_domain;
+        for (unsigned method = 0u; method != 2u; ++method) {
+            AdaptiveComparison& result = comparisons[method];
+            UpperBoxType candidate = problem.initial_domain;
             reduce_adaptive_shaving(
-                solver,candidate,problem.function,codomains[q],
-                settings[method],&result.activity);
-            if(not definitely(refines(candidate,problem.initial_domain)))
+                solver, candidate, problem.function, codomains[q],
+                settings[method], &result.activity);
+            if (not definitely(refines(candidate, problem.initial_domain)))
                 throw std::runtime_error(
                     "adaptive contractor enlarged its initial domain"
-                    " shape="+shape+" method="+labels[method]
-                    +" query="+std::to_string(q));
-            if(verified_witness) {
+                    " shape=" +
+                    shape + " method=" + labels[method] + " query=" + std::to_string(q));
+            if (verified_witness) {
                 ++result.feasible_witnesses;
-                if(definitely(disjoint(candidate,witness)))
+                if (definitely(disjoint(candidate, witness)))
                     throw std::runtime_error(
                         "adaptive contractor lost a certified feasible witness"
-                        " shape="+shape+" method="+labels[method]
-                        +" query="+std::to_string(q));
+                        " shape=" +
+                        shape + " method=" + labels[method] + " query=" + std::to_string(q));
             }
-            Bool const candidate_empty=definitely(candidate.is_empty());
-            if(selection.audit_all_ellipsoid_contractions)
+            const Bool candidate_empty = definitely(candidate.is_empty());
+            if (selection.audit_all_ellipsoid_contractions)
                 audit_all_exact_ellipsoid_contraction(
-                    q,labels[method],records[q],oracle[q],candidate,
-                    full_audits[method+1u]);
+                    q, labels[method], records[q], oracle[q], candidate,
+                    full_audits[method + 1u]);
             // Provide query IDs for an independent exact-arithmetic
             // audit of additional empty results on the convex benchmark
             // geometry. This is diagnostic output, before timed sweeps.
-            if(candidate_empty and not empty) {
-                std::cout<<"ADAPTIVE_SHAVING_EXTRA_EMPTY shape="<<shape
-                         <<" method="<<labels[method]
-                         <<" query="<<q<<"\n";
-                if(shape=="rotated-ellipsoid") {
+            if (candidate_empty and not empty) {
+                std::cout << "ADAPTIVE_SHAVING_EXTRA_EMPTY shape=" << shape
+                          << " method=" << labels[method]
+                          << " query=" << q << "\n";
+                if (shape == "rotated-ellipsoid") {
                     ++audit.reported[method];
-                    auto const& minimum=oracle[q];
-                    if(minimum.empty()) {
+                    const auto& minimum = oracle[q];
+                    if (minimum.empty()) {
                         ++audit.proved_empty[method];
-                        std::cout<<"AUDIT_ELLIPSOID_QUERY method="<<labels[method]
-                                 <<" query="<<q<<" status=EXACTLY_EMPTY";
-                        if(not minimum.intersects_initial_domain)
-                            std::cout<<" box_disjoint_from_initial_domain=true";
+                        std::cout << "AUDIT_ELLIPSOID_QUERY method=" << labels[method]
+                                  << " query=" << q << " status=EXACTLY_EMPTY";
+                        if (not minimum.intersects_initial_domain)
+                            std::cout << " box_disjoint_from_initial_domain=true";
                         else
-                            std::cout<<" min_num="<<minimum.minimum.numerator()
-                                     <<" min_den="<<minimum.minimum.denominator()
-                                     <<" threshold=25";
-                        std::cout<<"\n";
+                            std::cout << " min_num=" << minimum.minimum.numerator()
+                                      << " min_den=" << minimum.minimum.denominator()
+                                      << " threshold=25";
+                        std::cout << "\n";
                     } else {
                         ++audit.false_positive[method];
-                        std::cout<<"AUDIT_ELLIPSOID_QUERY method="<<labels[method]
-                                 <<" query="<<q<<" status=COUNTEREXAMPLE"
-                                 <<" min_Q="<<minimum.minimum
-                                 <<" feasible_point="
-                                 <<exact_witness_string(minimum.witness)<<"\n";
+                        std::cout << "AUDIT_ELLIPSOID_QUERY method=" << labels[method]
+                                  << " query=" << q << " status=COUNTEREXAMPLE"
+                                  << " min_Q=" << minimum.minimum
+                                  << " feasible_point="
+                                  << exact_witness_string(minimum.witness) << "\n";
                     }
                 }
             }
-            result.candidate_only_empty+=
+            result.candidate_only_empty +=
                 static_cast<SizeType>(candidate_empty and not empty);
-            result.production_only_empty+=
+            result.production_only_empty +=
                 static_cast<SizeType>(not candidate_empty and empty);
-            result.both_empty+=
+            result.both_empty +=
                 static_cast<SizeType>(candidate_empty and empty);
-            if(same(candidate,production)) {
+            if (same(candidate, production)) {
                 ++result.exactly_same;
-            } else if(definitely(refines(candidate,production))) {
+            } else if (definitely(refines(candidate, production))) {
                 ++result.stronger;
-            } else if(definitely(refines(production,candidate))) {
+            } else if (definitely(refines(production, candidate))) {
                 ++result.weaker;
             } else {
                 ++result.incomparable;
-                if(selection.audit_resolution_incomparables and method==1u) {
+                if (selection.audit_resolution_incomparables and method == 1u) {
                     audit_resolution_incomparable_case(
-                        q,records[q],oracle[q],production,candidate,
+                        q, records[q], oracle[q], production, candidate,
                         incomparables);
                 }
             }
             // Semantic relation, independent of the internal representation
             // of an empty box. Keep the legacy counters above unchanged.
-            if(empty and candidate_empty) ++result.set_equal;
-            else if(candidate_empty) ++result.set_stronger;
-            else if(empty) ++result.set_weaker;
-            else if(same(candidate,production)) ++result.set_equal;
-            else if(definitely(refines(candidate,production)))
+            if (empty and candidate_empty)
+                ++result.set_equal;
+            else if (candidate_empty)
                 ++result.set_stronger;
-            else if(definitely(refines(production,candidate)))
+            else if (empty)
                 ++result.set_weaker;
-            else ++result.set_incomparable;
+            else if (same(candidate, production))
+                ++result.set_equal;
+            else if (definitely(refines(candidate, production)))
+                ++result.set_stronger;
+            else if (definitely(refines(production, candidate)))
+                ++result.set_weaker;
+            else
+                ++result.set_incomparable;
         }
     }
 
-    for(unsigned method=0u;method!=2u;++method) {
-        auto const& result=comparisons[method];
-        auto const& stats=result.activity;
-        if(result.exactly_same+result.stronger+result.weaker
-           +result.incomparable!=records.size()
-           or result.set_equal+result.set_stronger+result.set_weaker
-               +result.set_incomparable!=records.size())
+    for (unsigned method = 0u; method != 2u; ++method) {
+        const auto& result = comparisons[method];
+        const auto& stats = result.activity;
+        if (result.exactly_same + result.stronger + result.weaker + result.incomparable != records.size() or result.set_equal + result.set_stronger + result.set_weaker + result.set_incomparable != records.size())
             throw std::runtime_error("inconsistent adaptive comparison counters");
-        if(stats.evaluations>stats.calls*
-                static_cast<SizeType>(settings[method].evaluation_budget))
+        if (stats.evaluations > stats.calls *
+                                    static_cast<SizeType>(settings[method].evaluation_budget))
             throw std::runtime_error("adaptive shaving exceeded per-call budget");
-        std::cout<<"ADAPTIVE_SHAVING_VERIFIED shape="<<shape
-                 <<" method="<<labels[method]
-                 <<" queries="<<records.size()
-                 <<" baseline_separated="<<production_separated
-                 <<" exactly_same="<<result.exactly_same
-                 <<" stronger="<<result.stronger
-                 <<" weaker="<<result.weaker
-                 <<" incomparable="<<result.incomparable
-                 <<" candidate_only_empty="<<result.candidate_only_empty
-                 <<" production_only_empty="<<result.production_only_empty
-                 <<" both_empty="<<result.both_empty
-                 <<" certified_witnesses="<<result.feasible_witnesses
-                 <<" box_calls="<<stats.calls
-                 <<" box_evaluations="<<stats.evaluations
-                 <<" changed_box_calls="<<stats.changed_calls
-                 <<" excluded_cells="<<stats.rejected_cells
-                 <<" depth_stops="<<stats.depth_stops
-                 <<" budget_stops="<<stats.budget_stops
-                 <<" max_depth="<<settings[method].max_depth
-                 <<" evaluation_budget="<<settings[method].evaluation_budget
-                 <<"\n";
-        std::cout<<"ADAPTIVE_SHAVING_SET_RELATION shape="<<shape
-                 <<" method="<<labels[method]
-                 <<" queries="<<records.size()
-                 <<" equal="<<result.set_equal
-                 <<" stronger="<<result.set_stronger
-                 <<" weaker="<<result.set_weaker
-                 <<" incomparable="<<result.set_incomparable<<"\n";
-        if(shape=="rotated-ellipsoid") {
-            if(audit.reported[method]!=result.candidate_only_empty
-               or audit.reported[method]!=audit.proved_empty[method]
-                   +audit.false_positive[method])
+        std::cout << "ADAPTIVE_SHAVING_VERIFIED shape=" << shape
+                  << " method=" << labels[method]
+                  << " queries=" << records.size()
+                  << " baseline_separated=" << production_separated
+                  << " exactly_same=" << result.exactly_same
+                  << " stronger=" << result.stronger
+                  << " weaker=" << result.weaker
+                  << " incomparable=" << result.incomparable
+                  << " candidate_only_empty=" << result.candidate_only_empty
+                  << " production_only_empty=" << result.production_only_empty
+                  << " both_empty=" << result.both_empty
+                  << " certified_witnesses=" << result.feasible_witnesses
+                  << " box_calls=" << stats.calls
+                  << " box_evaluations=" << stats.evaluations
+                  << " changed_box_calls=" << stats.changed_calls
+                  << " excluded_cells=" << stats.rejected_cells
+                  << " depth_stops=" << stats.depth_stops
+                  << " budget_stops=" << stats.budget_stops
+                  << " max_depth=" << settings[method].max_depth
+                  << " evaluation_budget=" << settings[method].evaluation_budget
+                  << "\n";
+        std::cout << "ADAPTIVE_SHAVING_SET_RELATION shape=" << shape
+                  << " method=" << labels[method]
+                  << " queries=" << records.size()
+                  << " equal=" << result.set_equal
+                  << " stronger=" << result.set_stronger
+                  << " weaker=" << result.set_weaker
+                  << " incomparable=" << result.set_incomparable << "\n";
+        if (shape == "rotated-ellipsoid") {
+            if (audit.reported[method] != result.candidate_only_empty or audit.reported[method] != audit.proved_empty[method] + audit.false_positive[method])
                 throw std::runtime_error("inconsistent exact audit counters");
-            std::cout<<"AUDIT_ELLIPSOID_SUMMARY method="<<labels[method]
-                     <<" queries="<<records.size()
-                     <<" true_empty="<<audit.true_empty
-                     <<" baseline_separated="<<production_separated
-                     <<" baseline_false_positive="<<audit.baseline_false_positive
-                     <<" candidate_only_reported="<<audit.reported[method]
-                     <<" candidate_only_proved_empty="<<audit.proved_empty[method]
-                     <<" candidate_only_false_positive="<<audit.false_positive[method]
-                     <<"\n";
+            std::cout << "AUDIT_ELLIPSOID_SUMMARY method=" << labels[method]
+                      << " queries=" << records.size()
+                      << " true_empty=" << audit.true_empty
+                      << " baseline_separated=" << production_separated
+                      << " baseline_false_positive=" << audit.baseline_false_positive
+                      << " candidate_only_reported=" << audit.reported[method]
+                      << " candidate_only_proved_empty=" << audit.proved_empty[method]
+                      << " candidate_only_false_positive=" << audit.false_positive[method]
+                      << "\n";
         }
     }
-    if(selection.audit_resolution_incomparables) {
-        if(incomparables.cases!=comparisons[1].incomparable
-           or incomparables.cases!=incomparables.empty_geometry
-                                    +incomparables.feasible_geometry
-           or incomparables.cases!=incomparables.empty_box_cases
-                                    +incomparables.nonempty_incomparable
-           or incomparables.both_sound>incomparables.feasible_geometry
-           or incomparables.production_empty_cases
-                        >incomparables.empty_box_cases
-           or incomparables.candidate_empty_cases
-                        >incomparables.empty_box_cases)
+    if (selection.audit_resolution_incomparables) {
+        if (incomparables.cases != comparisons[1].incomparable or incomparables.cases != incomparables.empty_geometry + incomparables.feasible_geometry or incomparables.cases != incomparables.empty_box_cases + incomparables.nonempty_incomparable or incomparables.both_sound > incomparables.feasible_geometry or incomparables.production_empty_cases > incomparables.empty_box_cases or incomparables.candidate_empty_cases > incomparables.empty_box_cases)
             throw std::runtime_error(
                 "inconsistent exact incomparable audit counters");
-        std::cout<<"AUDIT_INCOMPARABLE_SUMMARY method=resolution"
-                 <<" queries="<<records.size()
-                 <<" incomparable="<<incomparables.cases
-                 <<" empty_box_cases="<<incomparables.empty_box_cases
-                 <<" nonempty_incomparable="
-                     <<incomparables.nonempty_incomparable
-                 <<" production_empty_cases="
-                     <<incomparables.production_empty_cases
-                 <<" candidate_empty_cases="
-                     <<incomparables.candidate_empty_cases
-                 <<" empty_geometry="<<incomparables.empty_geometry
-                 <<" feasible_geometry="<<incomparables.feasible_geometry
-                 <<" both_sound="<<incomparables.both_sound
-                 <<" production_loss_cases="
-                     <<incomparables.production_loss_cases
-                 <<" candidate_loss_cases="
-                     <<incomparables.candidate_loss_cases
-                 <<" cut_faces_checked="<<incomparables.cut_faces_checked
-                 <<"\n";
-        if(incomparables.production_loss_cases!=0u
-           or incomparables.candidate_loss_cases!=0u)
+        std::cout << "AUDIT_INCOMPARABLE_SUMMARY method=resolution"
+                  << " queries=" << records.size()
+                  << " incomparable=" << incomparables.cases
+                  << " empty_box_cases=" << incomparables.empty_box_cases
+                  << " nonempty_incomparable="
+                  << incomparables.nonempty_incomparable
+                  << " production_empty_cases="
+                  << incomparables.production_empty_cases
+                  << " candidate_empty_cases="
+                  << incomparables.candidate_empty_cases
+                  << " empty_geometry=" << incomparables.empty_geometry
+                  << " feasible_geometry=" << incomparables.feasible_geometry
+                  << " both_sound=" << incomparables.both_sound
+                  << " production_loss_cases="
+                  << incomparables.production_loss_cases
+                  << " candidate_loss_cases="
+                  << incomparables.candidate_loss_cases
+                  << " cut_faces_checked=" << incomparables.cut_faces_checked
+                  << "\n";
+        if (incomparables.production_loss_cases != 0u or incomparables.candidate_loss_cases != 0u)
             throw std::runtime_error(
                 "exact incomparable audit found a lost feasible point");
     }
-    if(selection.audit_all_ellipsoid_contractions) {
-        char const* contractor_names[]={"production","budget","resolution"};
-        SizeType total_losses=0u;
-        for(std::size_t i=0u;i<full_audits.size();++i) {
-            auto const& s=full_audits[i];
-            if(s.queries!=records.size()
-               or s.empty_geometry!=audit.true_empty
-               or s.empty_geometry+s.feasible_geometry!=s.queries
-               or s.empty_result_on_empty_geometry
-                    +s.nonempty_result_on_empty_geometry!=s.empty_geometry
-               or s.empty_result_on_feasible_geometry
-                    +s.nonempty_result_on_feasible_geometry!=s.feasible_geometry)
+    if (selection.audit_all_ellipsoid_contractions) {
+        const char* contractor_names[] = {"production", "budget", "resolution"};
+        SizeType total_losses = 0u;
+        for (std::size_t i = 0u; i < full_audits.size(); ++i) {
+            const auto& s = full_audits[i];
+            if (s.queries != records.size() or s.empty_geometry != audit.true_empty or s.empty_geometry + s.feasible_geometry != s.queries or s.empty_result_on_empty_geometry + s.nonempty_result_on_empty_geometry != s.empty_geometry or s.empty_result_on_feasible_geometry + s.nonempty_result_on_feasible_geometry != s.feasible_geometry)
                 throw std::runtime_error(
                     "inconsistent complete ellipsoid audit counters");
-            total_losses+=s.lost_cases;
-            std::cout<<"AUDIT_ALL_ELLIPSOID_SUMMARY"
-                     <<" contractor="<<contractor_names[i]
-                     <<" queries="<<s.queries
-                     <<" empty_geometry="<<s.empty_geometry
-                     <<" feasible_geometry="<<s.feasible_geometry
-                     <<" empty_result_on_empty_geometry="
-                         <<s.empty_result_on_empty_geometry
-                     <<" nonempty_result_on_empty_geometry="
-                         <<s.nonempty_result_on_empty_geometry
-                     <<" nonempty_result_on_feasible_geometry="
-                         <<s.nonempty_result_on_feasible_geometry
-                     <<" empty_result_on_feasible_geometry="
-                         <<s.empty_result_on_feasible_geometry
-                     <<" cut_faces_checked="<<s.cut_faces_checked
-                     <<" lost_faces="<<s.lost_faces
-                     <<" lost_cases="<<s.lost_cases<<"\n";
+            total_losses += s.lost_cases;
+            std::cout << "AUDIT_ALL_ELLIPSOID_SUMMARY"
+                      << " contractor=" << contractor_names[i]
+                      << " queries=" << s.queries
+                      << " empty_geometry=" << s.empty_geometry
+                      << " feasible_geometry=" << s.feasible_geometry
+                      << " empty_result_on_empty_geometry="
+                      << s.empty_result_on_empty_geometry
+                      << " nonempty_result_on_empty_geometry="
+                      << s.nonempty_result_on_empty_geometry
+                      << " nonempty_result_on_feasible_geometry="
+                      << s.nonempty_result_on_feasible_geometry
+                      << " empty_result_on_feasible_geometry="
+                      << s.empty_result_on_feasible_geometry
+                      << " cut_faces_checked=" << s.cut_faces_checked
+                      << " lost_faces=" << s.lost_faces
+                      << " lost_cases=" << s.lost_cases << "\n";
         }
-        if(total_losses!=0u)
+        if (total_losses != 0u)
             throw std::runtime_error(
                 "complete exact ellipsoid contraction audit found"
                 " feasible-point loss (see counterexamples)");
     }
-    if(shape=="rotated-ellipsoid"
-       and (audit.baseline_false_positive!=0u
-            or audit.false_positive[0]!=0u
-            or audit.false_positive[1]!=0u))
+    if (shape == "rotated-ellipsoid" and (audit.baseline_false_positive != 0u or audit.false_positive[0] != 0u or audit.false_positive[1] != 0u))
         throw std::runtime_error(
             "exact rotated-ellipsoid audit found unsound separation"
             " (see AUDIT_ELLIPSOID_* diagnostics)");
-    if(selection.verify_only) return;
+    if (selection.verify_only)
+        return;
 
-    auto production_work=[&] {
-        SizeType result=0u;
-        for(auto const& codomain:codomains) {
-            UpperBoxType domain=problem.initial_domain;
-            solver.reduce(domain,problem.function,codomain);
-            result+=static_cast<SizeType>(definitely(domain.is_empty()));
+    auto production_work = [&] {
+        SizeType result = 0u;
+        for (const auto& codomain: codomains) {
+            UpperBoxType domain = problem.initial_domain;
+            solver.reduce(domain, problem.function, codomain);
+            result += static_cast<SizeType>(definitely(domain.is_empty()));
             keep_alive(domain);
         }
         return result;
     };
-    Timing const baseline=median_ms(production_work,selection);
-    for(unsigned method=0u;method!=2u;++method) {
-        auto adaptive_work=[&] {
-            SizeType result=0u;
-            for(auto const& codomain:codomains) {
-                UpperBoxType domain=problem.initial_domain;
+    const Timing baseline = median_ms(production_work, selection);
+    for (unsigned method = 0u; method != 2u; ++method) {
+        auto adaptive_work = [&] {
+            SizeType result = 0u;
+            for (const auto& codomain: codomains) {
+                UpperBoxType domain = problem.initial_domain;
                 reduce_adaptive_shaving(
-                    solver,domain,problem.function,codomain,settings[method]);
-                result+=static_cast<SizeType>(definitely(domain.is_empty()));
+                    solver, domain, problem.function, codomain, settings[method]);
+                result += static_cast<SizeType>(definitely(domain.is_empty()));
                 keep_alive(domain);
             }
             return result;
         };
-        Timing const adaptive=median_ms(adaptive_work,selection);
-        double const ratio=baseline.milliseconds/adaptive.milliseconds;
-        if(not std::isfinite(ratio) or ratio<=0.0)
+        const Timing adaptive = median_ms(adaptive_work, selection);
+        const double ratio = baseline.milliseconds / adaptive.milliseconds;
+        if (not std::isfinite(ratio) or ratio <= 0.0)
             throw std::runtime_error("invalid adaptive shaving speed ratio");
-        std::cout<<"ADAPTIVE_SHAVING_COMPARE shape="<<shape
-                 <<" method="<<labels[method]
-                 <<" production_median_ms="<<std::fixed<<std::setprecision(5)
-                    <<baseline.milliseconds
-                 <<" adaptive_median_ms="<<adaptive.milliseconds
-                 <<" speedup="<<std::setprecision(3)<<ratio
-                 <<" samples="<<selection.samples
-                 <<" production_iters="<<baseline.iterations
-                 <<" adaptive_iters="<<adaptive.iterations
-                 <<"\n";
+        std::cout << "ADAPTIVE_SHAVING_COMPARE shape=" << shape
+                  << " method=" << labels[method]
+                  << " production_median_ms=" << std::fixed << std::setprecision(5)
+                  << baseline.milliseconds
+                  << " adaptive_median_ms=" << adaptive.milliseconds
+                  << " speedup=" << std::setprecision(3) << ratio
+                  << " samples=" << selection.samples
+                  << " production_iters=" << baseline.iterations
+                  << " adaptive_iters=" << adaptive.iterations
+                  << "\n";
     }
-    std::cout<<"ADAPTIVE_SHAVING_NOTE: candidate reductions are allowed to"
-                " differ from production; no equality or paving separation"
-                " assumption is imposed on the adaptive variants."
-                " Every excluded interval has a validated disjointness proof."
-                " Witness checks are restricted to certified feasible points."
-                " Only benchmark code changed.\n";
+    std::cout << "ADAPTIVE_SHAVING_NOTE: candidate reductions are allowed to"
+                 " differ from production; no equality or paving separation"
+                 " assumption is imposed on the adaptive variants."
+                 " Every excluded interval has a validated disjointness proof."
+                 " Witness checks are restricted to certified feasible points."
+                 " Only benchmark code changed.\n";
 }
 
 // The cached and uncached dyadic contractors traverse exactly the same
 // cells, spending the same *visit* budget. A memoized image-exclusion
 // proof only avoids another apply() to an identical cell in one box call.
 // The exact final domain must therefore be identical for each query.
-void compare_adaptive_cache(Selection const& selection,
-                            std::string const& shape) {
-    SolverProblem problem=make_problem(shape);
-    std::vector<TraceRecord> const records=
-        read_adaptive_trace(selection.trace_prefix,shape);
+void compare_adaptive_cache(const Selection& selection,
+                            const std::string& shape) {
+    SolverProblem problem = make_problem(shape);
+    const std::vector<TraceRecord> records =
+        read_adaptive_trace(selection.trace_prefix, shape);
     std::vector<ExactBoxType> codomains;
     codomains.reserve(records.size());
-    for(auto const& record:records) {
-        ExactBoxType codomain=problem.codomains.front();
-        for(SizeType i=0u;i<4u;++i) codomain[i]=record.box[i];
+    for (const auto& record: records) {
+        ExactBoxType codomain = problem.codomains.front();
+        for (SizeType i = 0u; i < 4u; ++i)
+            codomain[i] = record.box[i];
         codomains.push_back(std::move(codomain));
     }
 
     ConstraintSolver solver;
-    AdaptiveShavingSettings const settings[]={
-        {selection.adaptive_depth,selection.adaptive_budget},
-        {selection.adaptive_depth,selection.adaptive_resolution_budget}
+    const AdaptiveShavingSettings settings[] = {
+        {selection.adaptive_depth,            selection.adaptive_budget},
+        {selection.adaptive_depth, selection.adaptive_resolution_budget}
     };
-    char const* labels[]={"budget","resolution"};
-    for(unsigned method=0u;method!=2u;++method) {
+    const char* labels[] = {"budget", "resolution"};
+    for (unsigned method = 0u; method != 2u; ++method) {
         AdaptiveShavingStatistics uncached_stats;
         AdaptiveShavingStatistics cached_stats;
-        SizeType changed_from_production=0u;
-        SizeType extra_empty=0u;
-        SizeType missed_empty=0u;
-        SizeType separated=0u;
-        for(SizeType q=0u;q<codomains.size();++q) {
-            UpperBoxType production=problem.initial_domain;
-            solver.reduce(production,problem.function,codomains[q]);
-            UpperBoxType frozen=problem.initial_domain;
+        SizeType changed_from_production = 0u;
+        SizeType extra_empty = 0u;
+        SizeType missed_empty = 0u;
+        SizeType separated = 0u;
+        for (SizeType q = 0u; q < codomains.size(); ++q) {
+            UpperBoxType production = problem.initial_domain;
+            solver.reduce(production, problem.function, codomains[q]);
+            UpperBoxType frozen = problem.initial_domain;
             reduce_full_scan_reference(
-                solver,frozen,problem.function,codomains[q]);
-            if(not same(production,frozen))
+                solver, frozen, problem.function, codomains[q]);
+            if (not same(production, frozen))
                 throw std::runtime_error(
                     "adaptive cache baseline differs from frozen full scan"
-                    " shape="+shape+" query="+std::to_string(q));
-            if(definitely(production.is_empty())!=records[q].separated)
+                    " shape=" +
+                    shape + " query=" + std::to_string(q));
+            if (definitely(production.is_empty()) != records[q].separated)
                 throw std::runtime_error(
                     "adaptive cache baseline differs from paving separation"
-                    " shape="+shape+" query="+std::to_string(q));
+                    " shape=" +
+                    shape + " query=" + std::to_string(q));
 
-            UpperBoxType uncached=problem.initial_domain;
+            UpperBoxType uncached = problem.initial_domain;
             reduce_adaptive_shaving(
-                solver,uncached,problem.function,codomains[q],
-                settings[method],&uncached_stats,false);
-            UpperBoxType cached=problem.initial_domain;
+                solver, uncached, problem.function, codomains[q],
+                settings[method], &uncached_stats, false);
+            UpperBoxType cached = problem.initial_domain;
             reduce_adaptive_shaving(
-                solver,cached,problem.function,codomains[q],
-                settings[method],&cached_stats,true);
-            if(not same(cached,uncached))
+                solver, cached, problem.function, codomains[q],
+                settings[method], &cached_stats, true);
+            if (not same(cached, uncached))
                 throw std::runtime_error(
                     "memoized adaptive shaving changed contracted domain"
-                    " shape="+shape+" method="+labels[method]
-                    +" query="+std::to_string(q));
-            if(not same(uncached,production)) ++changed_from_production;
-            Bool const before_empty=definitely(production.is_empty());
-            Bool const candidate_empty=definitely(cached.is_empty());
-            extra_empty+=static_cast<SizeType>(
+                    " shape=" +
+                    shape + " method=" + labels[method] + " query=" + std::to_string(q));
+            if (not same(uncached, production))
+                ++changed_from_production;
+            const Bool before_empty = definitely(production.is_empty());
+            const Bool candidate_empty = definitely(cached.is_empty());
+            extra_empty += static_cast<SizeType>(
                 candidate_empty and not before_empty);
-            missed_empty+=static_cast<SizeType>(
+            missed_empty += static_cast<SizeType>(
                 not candidate_empty and before_empty);
-            separated+=static_cast<SizeType>(candidate_empty);
+            separated += static_cast<SizeType>(candidate_empty);
         }
-        if(uncached_stats.cache_hits!=0u
-           or uncached_stats.evaluations!=uncached_stats.cell_visits
-           or cached_stats.cell_visits!=uncached_stats.cell_visits
-           or cached_stats.evaluations+cached_stats.cache_hits
-              !=cached_stats.cell_visits
-           or cached_stats.calls!=uncached_stats.calls
-           or cached_stats.rounds!=uncached_stats.rounds
-           or cached_stats.changed_calls!=uncached_stats.changed_calls
-           or cached_stats.emptied_calls!=uncached_stats.emptied_calls
-           or cached_stats.rejected_cells!=uncached_stats.rejected_cells
-           or cached_stats.depth_stops!=uncached_stats.depth_stops
-           or cached_stats.budget_stops!=uncached_stats.budget_stops)
+        if (uncached_stats.cache_hits != 0u or uncached_stats.evaluations != uncached_stats.cell_visits or cached_stats.cell_visits != uncached_stats.cell_visits or cached_stats.evaluations + cached_stats.cache_hits != cached_stats.cell_visits or cached_stats.calls != uncached_stats.calls or cached_stats.rounds != uncached_stats.rounds or cached_stats.changed_calls != uncached_stats.changed_calls or cached_stats.emptied_calls != uncached_stats.emptied_calls or cached_stats.rejected_cells != uncached_stats.rejected_cells or cached_stats.depth_stops != uncached_stats.depth_stops or cached_stats.budget_stops != uncached_stats.budget_stops)
             throw std::runtime_error(
                 "memoized adaptive shaving changed visit sequence or counters");
-        if(cached_stats.evaluations>cached_stats.calls*
-              static_cast<SizeType>(settings[method].evaluation_budget))
+        if (cached_stats.evaluations > cached_stats.calls *
+                                           static_cast<SizeType>(settings[method].evaluation_budget))
             throw std::runtime_error("cached adaptive evaluation budget exceeded");
 
-        std::cout<<"ADAPTIVE_CACHE_VERIFIED shape="<<shape
-                 <<" method="<<labels[method]
-                 <<" queries="<<records.size()
-                 <<" contracted_boxes_changed_vs_production="
-                    <<changed_from_production
-                 <<" candidate_separated="<<separated
-                 <<" candidate_only_empty="<<extra_empty
-                 <<" production_only_empty="<<missed_empty
-                 <<" box_calls="<<cached_stats.calls
-                 <<" cell_visits="<<cached_stats.cell_visits
-                 <<" uncached_evaluations="<<uncached_stats.evaluations
-                 <<" cached_evaluations="<<cached_stats.evaluations
-                 <<" cache_hits="<<cached_stats.cache_hits
-                 <<" reused_pct="<<std::fixed<<std::setprecision(2)
-                    <<(cached_stats.cell_visits
-                        ?100.0*static_cast<double>(cached_stats.cache_hits)
-                             /cached_stats.cell_visits:0.0)
-                 <<" budget_stops="<<cached_stats.budget_stops
-                 <<" depth_stops="<<cached_stats.depth_stops
-                 <<"\n";
-        if(selection.verify_only) continue;
+        std::cout << "ADAPTIVE_CACHE_VERIFIED shape=" << shape
+                  << " method=" << labels[method]
+                  << " queries=" << records.size()
+                  << " contracted_boxes_changed_vs_production="
+                  << changed_from_production
+                  << " candidate_separated=" << separated
+                  << " candidate_only_empty=" << extra_empty
+                  << " production_only_empty=" << missed_empty
+                  << " box_calls=" << cached_stats.calls
+                  << " cell_visits=" << cached_stats.cell_visits
+                  << " uncached_evaluations=" << uncached_stats.evaluations
+                  << " cached_evaluations=" << cached_stats.evaluations
+                  << " cache_hits=" << cached_stats.cache_hits
+                  << " reused_pct=" << std::fixed << std::setprecision(2)
+                  << (cached_stats.cell_visits
+                          ? 100.0 * static_cast<double>(cached_stats.cache_hits) / cached_stats.cell_visits
+                          : 0.0)
+                  << " budget_stops=" << cached_stats.budget_stops
+                  << " depth_stops=" << cached_stats.depth_stops
+                  << "\n";
+        if (selection.verify_only)
+            continue;
 
-        auto production_work=[&] {
-            SizeType checksum=0u;
-            for(auto const& codomain:codomains) {
-                UpperBoxType domain=problem.initial_domain;
-                solver.reduce(domain,problem.function,codomain);
-                checksum+=static_cast<SizeType>(definitely(domain.is_empty()));
+        auto production_work = [&] {
+            SizeType checksum = 0u;
+            for (const auto& codomain: codomains) {
+                UpperBoxType domain = problem.initial_domain;
+                solver.reduce(domain, problem.function, codomain);
+                checksum += static_cast<SizeType>(definitely(domain.is_empty()));
                 keep_alive(domain);
             }
             return checksum;
         };
-        auto adaptive_work=[&](bool cache_enabled) {
-            SizeType checksum=0u;
-            for(auto const& codomain:codomains) {
-                UpperBoxType domain=problem.initial_domain;
+        auto adaptive_work = [&](bool cache_enabled) {
+            SizeType checksum = 0u;
+            for (const auto& codomain: codomains) {
+                UpperBoxType domain = problem.initial_domain;
                 reduce_adaptive_shaving(
-                    solver,domain,problem.function,codomain,
-                    settings[method],nullptr,cache_enabled);
-                checksum+=static_cast<SizeType>(definitely(domain.is_empty()));
+                    solver, domain, problem.function, codomain,
+                    settings[method], nullptr, cache_enabled);
+                checksum += static_cast<SizeType>(definitely(domain.is_empty()));
                 keep_alive(domain);
             }
             return checksum;
         };
-        if(adaptive_work(false)!=separated
-           or adaptive_work(true)!=separated)
+        if (adaptive_work(false) != separated or adaptive_work(true) != separated)
             throw std::runtime_error("adaptive cache timed checksum mismatch");
 
-        Timing const production_time=median_ms(production_work,selection);
-        Timing const uncached_time=median_ms(
-            [&]{return adaptive_work(false);},selection);
-        Timing const cached_time=median_ms(
-            [&]{return adaptive_work(true);},selection);
-        double const cache_speedup=
-            uncached_time.milliseconds/cached_time.milliseconds;
-        double const production_speedup=
-            production_time.milliseconds/cached_time.milliseconds;
-        if(not std::isfinite(cache_speedup)
-           or not std::isfinite(production_speedup)
-           or cache_speedup<=0.0 or production_speedup<=0.0)
+        const Timing production_time = median_ms(production_work, selection);
+        const Timing uncached_time = median_ms(
+            [&] { return adaptive_work(false); }, selection);
+        const Timing cached_time = median_ms(
+            [&] { return adaptive_work(true); }, selection);
+        const double cache_speedup =
+            uncached_time.milliseconds / cached_time.milliseconds;
+        const double production_speedup =
+            production_time.milliseconds / cached_time.milliseconds;
+        if (not std::isfinite(cache_speedup) or not std::isfinite(production_speedup) or cache_speedup <= 0.0 or production_speedup <= 0.0)
             throw std::runtime_error("invalid adaptive cache speedup");
 
-        std::cout<<"ADAPTIVE_CACHE_COMPARE shape="<<shape
-                 <<" method="<<labels[method]
-                 <<" production_median_ms="<<std::fixed<<std::setprecision(5)
-                     <<production_time.milliseconds
-                 <<" uncached_median_ms="<<uncached_time.milliseconds
-                 <<" cached_median_ms="<<cached_time.milliseconds
-                 <<" cache_speedup="<<std::setprecision(3)<<cache_speedup
-                 <<" production_to_cached_speedup="<<production_speedup
-                 <<" samples="<<selection.samples
-                 <<"\n";
+        std::cout << "ADAPTIVE_CACHE_COMPARE shape=" << shape
+                  << " method=" << labels[method]
+                  << " production_median_ms=" << std::fixed << std::setprecision(5)
+                  << production_time.milliseconds
+                  << " uncached_median_ms=" << uncached_time.milliseconds
+                  << " cached_median_ms=" << cached_time.milliseconds
+                  << " cache_speedup=" << std::setprecision(3) << cache_speedup
+                  << " production_to_cached_speedup=" << production_speedup
+                  << " samples=" << selection.samples
+                  << "\n";
     }
-    std::cout<<"ADAPTIVE_CACHE_NOTE: each mode keeps the identical"
-                " cell-visit budget and order for cached and uncached runs."
-                " Memoization is local to one box_reduce; final boxes must"
-                " match exactly. Different domains from P1 production are"
-                " still diagnostic and are not endorsed for promotion."
-                " Independent medians are fixed-order measurements.\n";
+    std::cout << "ADAPTIVE_CACHE_NOTE: each mode keeps the identical"
+                 " cell-visit budget and order for cached and uncached runs."
+                 " Memoization is local to one box_reduce; final boxes must"
+                 " match exactly. Different domains from P1 production are"
+                 " still diagnostic and are not endorsed for promotion."
+                 " Independent medians are fixed-order measurements.\n";
 }
 
 // Production-first adaptive candidate, benchmark-only. All variants use the
 // existing validated contractor and its verified per-call cell memoization.
 // The gate uses only the P1 output width sum and contains no shape/oracle logic.
 struct HybridCounters {
-    SizeType queries=0u;
-    SizeType activated=0u;
-    SizeType skipped_empty=0u;
-    SizeType skipped_gate=0u;
-    SizeType unchanged=0u;
-    SizeType strictly_stronger=0u;
-    SizeType extra_separated=0u;
-    SizeType separated=0u;
-    SizeType witness_checks=0u;
-    SizeType cut_faces=0u;
-    SizeType soundness_failures=0u;
+    SizeType queries = 0u;
+    SizeType activated = 0u;
+    SizeType skipped_empty = 0u;
+    SizeType skipped_gate = 0u;
+    SizeType unchanged = 0u;
+    SizeType strictly_stronger = 0u;
+    SizeType extra_separated = 0u;
+    SizeType separated = 0u;
+    SizeType witness_checks = 0u;
+    SizeType cut_faces = 0u;
+    SizeType soundness_failures = 0u;
     AdaptiveShavingStatistics adaptive;
 };
 
-double hybrid_width_sum(UpperBoxType const& box) {
-    double sum=0.0;
-    for(SizeType i=0u;i<box.size();++i)
-        sum+=box[i].upper_bound().get_d()-box[i].lower_bound().get_d();
+double hybrid_width_sum(const UpperBoxType& box) {
+    double sum = 0.0;
+    for (SizeType i = 0u; i < box.size(); ++i)
+        sum += box[i].upper_bound().get_d() - box[i].lower_bound().get_d();
     return sum;
 }
 
-bool hybrid_gate(UpperBoxType const& production,double width_threshold) {
+bool hybrid_gate(const UpperBoxType& production, double width_threshold) {
     // The same, predeclared dimensionless gate applies to all five shapes.
     // The initial 4D unit cube has width sum 4.0.
-    return hybrid_width_sum(production)>=width_threshold;
+    return hybrid_width_sum(production) >= width_threshold;
 }
 
 void hybrid_after_production(
-        ConstraintSolver const& solver,UpperBoxType& domain,
-        ValidatedVectorMultivariateFunction const& function,
-        ExactBoxType const& codomain,AdaptiveShavingSettings const& settings,
-        double threshold,bool gated,HybridCounters* counters=nullptr) {
-    if(counters) ++counters->queries;
-    if(definitely(domain.is_empty())) {
-        if(counters) ++counters->skipped_empty;
+    const ConstraintSolver& solver, UpperBoxType& domain,
+    const ValidatedVectorMultivariateFunction& function,
+    const ExactBoxType& codomain, const AdaptiveShavingSettings& settings,
+    double threshold, bool gated, HybridCounters* counters = nullptr) {
+    if (counters)
+        ++counters->queries;
+    if (definitely(domain.is_empty())) {
+        if (counters)
+            ++counters->skipped_empty;
         return;
     }
-    if(gated and not hybrid_gate(domain,threshold)) {
-        if(counters) ++counters->skipped_gate;
+    if (gated and not hybrid_gate(domain, threshold)) {
+        if (counters)
+            ++counters->skipped_gate;
         return;
     }
-    if(counters) ++counters->activated;
+    if (counters)
+        ++counters->activated;
     reduce_adaptive_shaving(
-        solver,domain,function,codomain,settings,
-        counters?&counters->adaptive:nullptr,true);
+        solver, domain, function, codomain, settings,
+        counters ? &counters->adaptive : nullptr, true);
 }
 
 struct HybridRow {
     std::string shape;
-    SizeType queries=0u;
-    SizeType baseline_separated=0u;
+    SizeType queries = 0u;
+    SizeType baseline_separated = 0u;
     HybridCounters always;
     HybridCounters gated;
-    double production_ms=0.0;
-    double always_ms=0.0;
-    double gated_ms=0.0;
-    unsigned production_iterations=0u;
-    unsigned always_iterations=0u;
-    unsigned gated_iterations=0u;
+    double production_ms = 0.0;
+    double always_ms = 0.0;
+    double gated_ms = 0.0;
+    unsigned production_iterations = 0u;
+    unsigned always_iterations = 0u;
+    unsigned gated_iterations = 0u;
 };
 
 HybridRow compare_hybrid_shaving(
-        Selection const& selection,std::string const& shape) {
-    SolverProblem problem=make_problem(shape);
-    std::vector<TraceRecord> const traces=
-        read_adaptive_trace(selection.trace_prefix,shape);
+    const Selection& selection, const std::string& shape) {
+    SolverProblem problem = make_problem(shape);
+    const std::vector<TraceRecord> traces =
+        read_adaptive_trace(selection.trace_prefix, shape);
     std::vector<ExactBoxType> codomains;
     codomains.reserve(traces.size());
-    for(auto const& trace:traces) {
-        ExactBoxType codomain=problem.codomains.front();
-        for(SizeType j=0u;j<4u;++j) codomain[j]=trace.box[j];
+    for (const auto& trace: traces) {
+        ExactBoxType codomain = problem.codomains.front();
+        for (SizeType j = 0u; j < 4u; ++j)
+            codomain[j] = trace.box[j];
         codomains.push_back(std::move(codomain));
     }
     HybridRow row;
-    row.shape=shape;
-    row.queries=traces.size();
+    row.shape = shape;
+    row.queries = traces.size();
     ConstraintSolver solver;
-    AdaptiveShavingSettings const resolution{
-        selection.adaptive_depth,selection.adaptive_resolution_budget
-    };
+    const AdaptiveShavingSettings resolution{
+        selection.adaptive_depth, selection.adaptive_resolution_budget};
     // Verification remains outside measured sweeps, including the exact
     // geometry oracle (rotated-ellipsoid only).
-    for(SizeType q=0u;q<traces.size();++q) {
-        UpperBoxType baseline=problem.initial_domain;
-        solver.reduce(baseline,problem.function,codomains[q]);
-        UpperBoxType frozen=problem.initial_domain;
+    for (SizeType q = 0u; q < traces.size(); ++q) {
+        UpperBoxType baseline = problem.initial_domain;
+        solver.reduce(baseline, problem.function, codomains[q]);
+        UpperBoxType frozen = problem.initial_domain;
         reduce_full_scan_reference(
-            solver,frozen,problem.function,codomains[q]);
-        if(not same(baseline,frozen))
+            solver, frozen, problem.function, codomains[q]);
+        if (not same(baseline, frozen))
             throw std::runtime_error(
-                "hybrid baseline differs from frozen scan shape="
-                +shape+" query="+std::to_string(q));
-        bool const empty=definitely(baseline.is_empty());
-        if(empty!=traces[q].separated)
+                "hybrid baseline differs from frozen scan shape=" + shape + " query=" + std::to_string(q));
+        const bool empty = definitely(baseline.is_empty());
+        if (empty != traces[q].separated)
             throw std::runtime_error(
-                "hybrid baseline differs from exported trace shape="
-                +shape+" query="+std::to_string(q));
-        row.baseline_separated+=static_cast<SizeType>(empty);
+                "hybrid baseline differs from exported trace shape=" + shape + " query=" + std::to_string(q));
+        row.baseline_separated += static_cast<SizeType>(empty);
 
-        UpperBoxType always=baseline;
+        UpperBoxType always = baseline;
         hybrid_after_production(
-            solver,always,problem.function,codomains[q],resolution,
-            selection.hybrid_width_threshold,false,&row.always);
-        UpperBoxType gated=baseline;
+            solver, always, problem.function, codomains[q], resolution,
+            selection.hybrid_width_threshold, false, &row.always);
+        UpperBoxType gated = baseline;
         hybrid_after_production(
-            solver,gated,problem.function,codomains[q],resolution,
-            selection.hybrid_width_threshold,true,&row.gated);
-        const bool gate_activated=
-            not empty and hybrid_gate(baseline,selection.hybrid_width_threshold);
-        if(gate_activated and not same(always,gated))
+            solver, gated, problem.function, codomains[q], resolution,
+            selection.hybrid_width_threshold, true, &row.gated);
+        const bool gate_activated =
+            not empty and hybrid_gate(baseline, selection.hybrid_width_threshold);
+        if (gate_activated and not same(always, gated))
             throw std::runtime_error(
-                "hybrid gate activated but changed adaptive result shape="
-                +shape+" query="+std::to_string(q));
-        if(not gate_activated and not same(baseline,gated))
+                "hybrid gate activated but changed adaptive result shape=" + shape + " query=" + std::to_string(q));
+        if (not gate_activated and not same(baseline, gated))
             throw std::runtime_error(
-                "hybrid gate skipped but changed production box shape="
-                +shape+" query="+std::to_string(q));
+                "hybrid gate skipped but changed production box shape=" + shape + " query=" + std::to_string(q));
 
         // Independently certified centre witness for arbitrary shapes.
-        UpperBoxType const witness=ExactBoxType({
-            {0.5_x,0.5_x},{0.5_x,0.5_x},
-            {0.5_x,0.5_x},{0.5_x,0.5_x}});
-        bool feasible_centre=true;
-        for(SizeType i=0u;i<codomains[q].size();++i) {
-            if(not definitely(subset(
-                    Ariadne::apply(problem.function[i],witness),
+        const UpperBoxType witness = ExactBoxType({
+            {0.5_x, 0.5_x},
+            {0.5_x, 0.5_x},
+            {0.5_x, 0.5_x},
+            {0.5_x, 0.5_x}
+        });
+        bool feasible_centre = true;
+        for (SizeType i = 0u; i < codomains[q].size(); ++i) {
+            if (not definitely(subset(
+                    Ariadne::apply(problem.function[i], witness),
                     codomains[q][i]))) {
-                feasible_centre=false;
+                feasible_centre = false;
                 break;
             }
         }
@@ -2792,218 +2819,207 @@ HybridRow compare_hybrid_shaving(
         // Complete exact convex feasibility for rotated-ellipsoid, not
         // consulted when choosing the gate or during timed sweeps.
         ExactEllipsoidMinimum exact;
-        if(shape=="rotated-ellipsoid")
-            exact=exact_rotated_ellipsoid_minimum(traces[q].endpoints);
+        if (shape == "rotated-ellipsoid")
+            exact = exact_rotated_ellipsoid_minimum(traces[q].endpoints);
 
-        for(unsigned variant=0u;variant!=2u;++variant) {
-            HybridCounters& counts=variant==0u?row.always:row.gated;
-            UpperBoxType const& candidate=variant==0u?always:gated;
-            bool const candidate_empty=definitely(candidate.is_empty());
-            counts.separated+=static_cast<SizeType>(candidate_empty);
-            counts.extra_separated+=static_cast<SizeType>(
+        for (unsigned variant = 0u; variant != 2u; ++variant) {
+            HybridCounters& counts = variant == 0u ? row.always : row.gated;
+            const UpperBoxType& candidate = variant == 0u ? always : gated;
+            const bool candidate_empty = definitely(candidate.is_empty());
+            counts.separated += static_cast<SizeType>(candidate_empty);
+            counts.extra_separated += static_cast<SizeType>(
                 candidate_empty and not empty);
-            if(empty and not candidate_empty)
+            if (empty and not candidate_empty)
                 throw std::runtime_error(
-                    "hybrid lost production separation shape="
-                    +shape+" query="+std::to_string(q));
-            if((empty and candidate_empty)
-               or (not empty and not candidate_empty
-                   and same(candidate,baseline))) {
+                    "hybrid lost production separation shape=" + shape + " query=" + std::to_string(q));
+            if ((empty and candidate_empty) or (not empty and not candidate_empty and same(candidate, baseline))) {
                 ++counts.unchanged;
-            } else if(candidate_empty
-                      or definitely(refines(candidate,baseline))) {
+            } else if (candidate_empty or definitely(refines(candidate, baseline))) {
                 ++counts.strictly_stronger;
             } else {
                 throw std::runtime_error(
-                    "hybrid result does not refine P1 shape="+shape
-                    +" query="+std::to_string(q));
+                    "hybrid result does not refine P1 shape=" + shape + " query=" + std::to_string(q));
             }
 
-            if(feasible_centre) {
+            if (feasible_centre) {
                 ++counts.witness_checks;
-                if(candidate_empty
-                   or definitely(disjoint(candidate,witness)))
+                if (candidate_empty or definitely(disjoint(candidate, witness)))
                     throw std::runtime_error(
-                        "hybrid lost certified feasible witness shape="
-                        +shape+" query="+std::to_string(q));
+                        "hybrid lost certified feasible witness shape=" + shape + " query=" + std::to_string(q));
             }
-            if(shape=="rotated-ellipsoid") {
+            if (shape == "rotated-ellipsoid") {
                 // The complete 4D geometry-specific rational audit.
-                if(exact.empty()) continue;
-                if(candidate_empty) {
+                if (exact.empty())
+                    continue;
+                if (candidate_empty) {
                     ++counts.soundness_failures;
-                    LOGGING_PRINTLN("HYBRID_EXACT_COUNTEREXAMPLE shape="<<shape
-                             <<" variant="<<(variant==0u?"always":"gated")
-                             <<" query="<<q
-                             <<" feasible_point="
-                             <<exact_witness_string(exact.witness))
+                    LOGGING_PRINTLN("HYBRID_EXACT_COUNTEREXAMPLE shape=" << shape
+                                                                         << " variant=" << (variant == 0u ? "always" : "gated")
+                                                                         << " query=" << q
+                                                                         << " feasible_point="
+                                                                         << exact_witness_string(exact.witness))
                 } else {
-                    ExactContractionAudit const cut=
+                    const ExactContractionAudit cut =
                         audit_exact_ellipsoid_contraction(
                             traces[q].endpoints,
                             exact_audit_box_endpoints(candidate));
-                    counts.cut_faces+=cut.cut_faces;
-                    if(cut.lost_faces!=0u) {
+                    counts.cut_faces += cut.cut_faces;
+                    if (cut.lost_faces != 0u) {
                         ++counts.soundness_failures;
-                        LOGGING_PRINTLN("HYBRID_EXACT_COUNTEREXAMPLE shape="<<shape
-                                 <<" variant="<<(variant==0u?"always":"gated")
-                                 <<" query="<<q
-                                 <<" feasible_point="
-                                 <<exact_witness_string(cut.witness)
-                                 <<" feasible_Q="<<cut.witness_q)
+                        LOGGING_PRINTLN("HYBRID_EXACT_COUNTEREXAMPLE shape=" << shape
+                                                                             << " variant=" << (variant == 0u ? "always" : "gated")
+                                                                             << " query=" << q
+                                                                             << " feasible_point="
+                                                                             << exact_witness_string(cut.witness)
+                                                                             << " feasible_Q=" << cut.witness_q)
                     }
                 }
             }
         }
     }
 
-    for(auto const& counters:{row.always,row.gated}) {
-        if(counters.queries!=traces.size()
-           or counters.activated+counters.skipped_gate
-                           +counters.skipped_empty!=traces.size()
-           or counters.unchanged+counters.strictly_stronger!=traces.size()
-           or counters.soundness_failures!=0u)
+    for (const auto& counters: {row.always, row.gated}) {
+        if (counters.queries != traces.size() or counters.activated + counters.skipped_gate + counters.skipped_empty != traces.size() or counters.unchanged + counters.strictly_stronger != traces.size() or counters.soundness_failures != 0u)
             throw std::runtime_error(
-                "hybrid verification or exact soundness failure shape="+shape);
+                "hybrid verification or exact soundness failure shape=" + shape);
     }
-    if(row.gated.activated>row.always.activated
-       or row.gated.extra_separated>row.always.extra_separated)
+    if (row.gated.activated > row.always.activated or row.gated.extra_separated > row.always.extra_separated)
         throw std::runtime_error("hybrid gate inconsistent with always-on");
-    LOGGING_PRINTLN("HYBRID_VERIFIED shape="<<shape
-        <<" queries="<<row.queries
-        <<" baseline_empty="<<row.baseline_separated
-        <<" always_activated="<<row.always.activated
-        <<" always_extra_empty="<<row.always.extra_separated
-        <<" always_stronger="<<row.always.strictly_stronger
-        <<" gated_activated="<<row.gated.activated
-        <<" gated_skipped_width="<<row.gated.skipped_gate
-        <<" gated_extra_empty="<<row.gated.extra_separated
-        <<" gated_stronger="<<row.gated.strictly_stronger
-        <<" always_evaluations="<<row.always.adaptive.evaluations
-        <<" gated_evaluations="<<row.gated.adaptive.evaluations
-        <<" exact_soundness_failures="
-            <<(row.always.soundness_failures+row.gated.soundness_failures))
+    LOGGING_PRINTLN("HYBRID_VERIFIED shape=" << shape
+                                             << " queries=" << row.queries
+                                             << " baseline_empty=" << row.baseline_separated
+                                             << " always_activated=" << row.always.activated
+                                             << " always_extra_empty=" << row.always.extra_separated
+                                             << " always_stronger=" << row.always.strictly_stronger
+                                             << " gated_activated=" << row.gated.activated
+                                             << " gated_skipped_width=" << row.gated.skipped_gate
+                                             << " gated_extra_empty=" << row.gated.extra_separated
+                                             << " gated_stronger=" << row.gated.strictly_stronger
+                                             << " always_evaluations=" << row.always.adaptive.evaluations
+                                             << " gated_evaluations=" << row.gated.adaptive.evaluations
+                                             << " exact_soundness_failures="
+                                             << (row.always.soundness_failures + row.gated.soundness_failures))
 
-    if(selection.verify_only) return row;
+    if (selection.verify_only)
+        return row;
 
-    auto timed=[&](int variant) {
-        SizeType checksum=0u;
-        for(auto const& codomain:codomains) {
-            UpperBoxType domain=problem.initial_domain;
-            solver.reduce(domain,problem.function,codomain);
-            if(variant!=0)
+    auto timed = [&](int variant) {
+        SizeType checksum = 0u;
+        for (const auto& codomain: codomains) {
+            UpperBoxType domain = problem.initial_domain;
+            solver.reduce(domain, problem.function, codomain);
+            if (variant != 0)
                 hybrid_after_production(
-                    solver,domain,problem.function,codomain,resolution,
-                    selection.hybrid_width_threshold,variant==2);
-            checksum+=static_cast<SizeType>(definitely(domain.is_empty()));
+                    solver, domain, problem.function, codomain, resolution,
+                    selection.hybrid_width_threshold, variant == 2);
+            checksum += static_cast<SizeType>(definitely(domain.is_empty()));
             keep_alive(domain);
         }
         return checksum;
     };
-    if(timed(0)!=row.baseline_separated
-       or timed(1)!=row.always.separated
-       or timed(2)!=row.gated.separated)
-        throw std::runtime_error("hybrid timed-checksum mismatch shape="+shape);
-    Timing const t0=median_ms([&]{return timed(0);},selection);
-    Timing const t1=median_ms([&]{return timed(1);},selection);
-    Timing const t2=median_ms([&]{return timed(2);},selection);
-    row.production_ms=t0.milliseconds;
-    row.always_ms=t1.milliseconds;
-    row.gated_ms=t2.milliseconds;
-    row.production_iterations=t0.iterations;
-    row.always_iterations=t1.iterations;
-    row.gated_iterations=t2.iterations;
-    for(double x:{row.production_ms,row.always_ms,row.gated_ms})
-        if(not std::isfinite(x) or x<=0.0)
+    if (timed(0) != row.baseline_separated or timed(1) != row.always.separated or timed(2) != row.gated.separated)
+        throw std::runtime_error("hybrid timed-checksum mismatch shape=" + shape);
+    const Timing t0 = median_ms([&] { return timed(0); }, selection);
+    const Timing t1 = median_ms([&] { return timed(1); }, selection);
+    const Timing t2 = median_ms([&] { return timed(2); }, selection);
+    row.production_ms = t0.milliseconds;
+    row.always_ms = t1.milliseconds;
+    row.gated_ms = t2.milliseconds;
+    row.production_iterations = t0.iterations;
+    row.always_iterations = t1.iterations;
+    row.gated_iterations = t2.iterations;
+    for (double x: {row.production_ms, row.always_ms, row.gated_ms})
+        if (not std::isfinite(x) or x <= 0.0)
             throw std::runtime_error("hybrid nonpositive/nonfinite timing");
     return row;
 }
 
 void print_hybrid_report(
-        std::vector<HybridRow> const& rows,Selection const& selection) {
-    if(rows.empty()) throw std::runtime_error("no hybrid benchmark shapes");
+    const std::vector<HybridRow>& rows, const Selection& selection) {
+    if (rows.empty())
+        throw std::runtime_error("no hybrid benchmark shapes");
     LOGGING_PRINTLN(" ")
     LOGGING_PRINTLN("P1 / hybrid adaptive resolution benchmark | d=4 f=3"
-                   <<" | samples="<<selection.samples
-                   <<" | gate: remaining width sum >= "
-                   <<std::fixed<<std::setprecision(2)
-                   <<selection.hybrid_width_threshold)
+                    << " | samples=" << selection.samples
+                    << " | gate: remaining width sum >= "
+                    << std::fixed << std::setprecision(2)
+                    << selection.hybrid_width_threshold)
     LOGGING_PRINTLN("Timing includes the entire P1 and adaptive sweep,"
-                   " with all adaptive memoization and gate overhead.")
+                    " with all adaptive memoization and gate overhead.")
     LOGGING_PRINTLN("Verified contractions and gating by shape")
-    LOGGING_PRINTLN(std::string(99u,'-'))
-    LOGGING_PRINTLN(std::left<<std::setw(20)<<"Shape"
-        <<std::right<<std::setw(10)<<"Queries"
-        <<std::setw(12)<<"P1 empty"
-        <<std::setw(15)<<"Always extra"
-        <<std::setw(15)<<"Gated extra"
-        <<std::setw(13)<<"Gated calls"
-        <<std::setw(14)<<"Gated evals")
-    for(auto const& row:rows) {
-        LOGGING_PRINTLN(std::left<<std::setw(20)<<row.shape
-            <<std::right<<std::setw(10)<<row.queries
-            <<std::setw(12)<<row.baseline_separated
-            <<std::setw(15)<<row.always.extra_separated
-            <<std::setw(15)<<row.gated.extra_separated
-            <<std::setw(13)<<row.gated.activated
-            <<std::setw(14)<<row.gated.adaptive.evaluations)
+    LOGGING_PRINTLN(std::string(99u, '-'))
+    LOGGING_PRINTLN(std::left << std::setw(20) << "Shape"
+                              << std::right << std::setw(10) << "Queries"
+                              << std::setw(12) << "P1 empty"
+                              << std::setw(15) << "Always extra"
+                              << std::setw(15) << "Gated extra"
+                              << std::setw(13) << "Gated calls"
+                              << std::setw(14) << "Gated evals")
+    for (const auto& row: rows) {
+        LOGGING_PRINTLN(std::left << std::setw(20) << row.shape
+                                  << std::right << std::setw(10) << row.queries
+                                  << std::setw(12) << row.baseline_separated
+                                  << std::setw(15) << row.always.extra_separated
+                                  << std::setw(15) << row.gated.extra_separated
+                                  << std::setw(13) << row.gated.activated
+                                  << std::setw(14) << row.gated.adaptive.evaluations)
     }
-    LOGGING_PRINTLN(std::string(99u,'-'))
-    if(selection.verify_only) {
+    LOGGING_PRINTLN(std::string(99u, '-'))
+    if (selection.verify_only) {
         LOGGING_PRINTLN("Verification only: no timing samples collected.")
         return;
     }
-    LOGGING_PRINTLN(std::string(113u,'='))
-    LOGGING_PRINTLN(std::left<<std::setw(20)<<"Shape"
-        <<std::right<<std::setw(14)<<"P1 (ms)"
-        <<std::setw(16)<<"Always (ms)"
-        <<std::setw(16)<<"Gated (ms)"
-        <<std::setw(15)<<"Always/P1"
-        <<std::setw(15)<<"Gated/P1"
-        <<std::setw(16)<<"Gate calls")
-    LOGGING_PRINTLN(std::string(113u,'-'))
-    double log_always=0.0,log_gated=0.0;
-    double total_p1=0.0,total_always=0.0,total_gated=0.0;
-    SizeType all_queries=0u,all_gate_activated=0u,all_extras=0u;
-    for(auto const& row:rows) {
-        double const a=row.production_ms/row.always_ms;
-        double const g=row.production_ms/row.gated_ms;
-        log_always+=std::log(a);
-        log_gated+=std::log(g);
-        total_p1+=row.production_ms;
-        total_always+=row.always_ms;
-        total_gated+=row.gated_ms;
-        all_queries+=row.queries;
-        all_gate_activated+=row.gated.activated;
-        all_extras+=row.gated.extra_separated;
-        LOGGING_PRINTLN(std::left<<std::setw(20)<<row.shape
-            <<std::right<<std::fixed<<std::setprecision(4)
-            <<std::setw(14)<<row.production_ms
-            <<std::setw(16)<<row.always_ms
-            <<std::setw(16)<<row.gated_ms
-            <<std::setprecision(3)
-            <<std::setw(14)<<a<<"x"
-            <<std::setw(14)<<g<<"x"
-            <<std::setw(16)<<row.gated.activated)
+    LOGGING_PRINTLN(std::string(113u, '='))
+    LOGGING_PRINTLN(std::left << std::setw(20) << "Shape"
+                              << std::right << std::setw(14) << "P1 (ms)"
+                              << std::setw(16) << "Always (ms)"
+                              << std::setw(16) << "Gated (ms)"
+                              << std::setw(15) << "Always/P1"
+                              << std::setw(15) << "Gated/P1"
+                              << std::setw(16) << "Gate calls")
+    LOGGING_PRINTLN(std::string(113u, '-'))
+    double log_always = 0.0, log_gated = 0.0;
+    double total_p1 = 0.0, total_always = 0.0, total_gated = 0.0;
+    SizeType all_queries = 0u, all_gate_activated = 0u, all_extras = 0u;
+    for (const auto& row: rows) {
+        const double a = row.production_ms / row.always_ms;
+        const double g = row.production_ms / row.gated_ms;
+        log_always += std::log(a);
+        log_gated += std::log(g);
+        total_p1 += row.production_ms;
+        total_always += row.always_ms;
+        total_gated += row.gated_ms;
+        all_queries += row.queries;
+        all_gate_activated += row.gated.activated;
+        all_extras += row.gated.extra_separated;
+        LOGGING_PRINTLN(std::left << std::setw(20) << row.shape
+                                  << std::right << std::fixed << std::setprecision(4)
+                                  << std::setw(14) << row.production_ms
+                                  << std::setw(16) << row.always_ms
+                                  << std::setw(16) << row.gated_ms
+                                  << std::setprecision(3)
+                                  << std::setw(14) << a << "x"
+                                  << std::setw(14) << g << "x"
+                                  << std::setw(16) << row.gated.activated)
     }
-    LOGGING_PRINTLN(std::string(113u,'='))
-    LOGGING_PRINTLN("HYBRID_AGGREGATE shapes="<<rows.size()
-        <<" queries="<<all_queries
-        <<" gate_activations="<<all_gate_activated
-        <<" gate_additional_empty="<<all_extras
-        <<" always_geomean_speedup="
-        <<std::fixed<<std::setprecision(4)
-        <<std::exp(log_always/static_cast<double>(rows.size()))
-        <<" gated_geomean_speedup="
-        <<std::exp(log_gated/static_cast<double>(rows.size()))
-        <<" production_sum_ms="<<total_p1
-        <<" always_sum_ms="<<total_always
-        <<" gated_sum_ms="<<total_gated
-        <<" always_total_speedup="<<(total_p1/total_always)
-        <<" gated_total_speedup="<<(total_p1/total_gated))
+    LOGGING_PRINTLN(std::string(113u, '='))
+    LOGGING_PRINTLN("HYBRID_AGGREGATE shapes=" << rows.size()
+                                               << " queries=" << all_queries
+                                               << " gate_activations=" << all_gate_activated
+                                               << " gate_additional_empty=" << all_extras
+                                               << " always_geomean_speedup="
+                                               << std::fixed << std::setprecision(4)
+                                               << std::exp(log_always / static_cast<double>(rows.size()))
+                                               << " gated_geomean_speedup="
+                                               << std::exp(log_gated / static_cast<double>(rows.size()))
+                                               << " production_sum_ms=" << total_p1
+                                               << " always_sum_ms=" << total_always
+                                               << " gated_sum_ms=" << total_gated
+                                               << " always_total_speedup=" << (total_p1 / total_always)
+                                               << " gated_total_speedup=" << (total_p1 / total_gated))
     LOGGING_PRINTLN("Ratios >1 mean faster than P1. Geomean weights each"
-        <<" shape equally; ratio of summed medians weights by workload."
-        <<" These are separate calibrated sweeps, not paired timings.")
+                    << " shape equally; ratio of summed medians weights by workload."
+                    << " These are separate calibrated sweeps, not paired timings.")
 }
 
 // P6 (benchmark only): cache the same specialized vector procedure used
@@ -3016,468 +3032,476 @@ void print_hybrid_report(
 // after the cache optimization is promoted. This code is a benchmark-only
 // historical reference, not an alternate production or public algorithm.
 Bool reduce_pre_p6_reference(
-        ConstraintSolver const& solver,
-        UpperBoxType& domain,
-        ValidatedVectorMultivariateFunction const& function,
-        ExactBoxType const& codomain) {
+    const ConstraintSolver& solver,
+    UpperBoxType& domain,
+    const ValidatedVectorMultivariateFunction& function,
+    const ExactBoxType& codomain) {
     const ExactDouble MINIMUM_REDUCTION = 0.75_x;
-    if(function.argument_size()!=domain.size()
-       or function.result_size()!=codomain.size())
+    if (function.argument_size() != domain.size() or function.result_size() != codomain.size())
         throw std::invalid_argument("P6 baseline dimension mismatch");
 
-    if(definitely(domain.is_empty())) return true;
-    std::vector<Bool> certified_satisfied(codomain.size(),false);
+    if (definitely(domain.is_empty()))
+        return true;
+    std::vector<Bool> certified_satisfied(codomain.size(), false);
 
-    FloatDPUpperBound domain_magnitude={0u,dp};
-    for(SizeType j=0; j!=domain.size(); ++j)
-        domain_magnitude+=domain[j].width();
-    FloatDPUpperBound old_domain_magnitude=domain_magnitude;
+    FloatDPUpperBound domain_magnitude = {0u, dp};
+    for (SizeType j = 0; j != domain.size(); ++j)
+        domain_magnitude += domain[j].width();
+    FloatDPUpperBound old_domain_magnitude = domain_magnitude;
 
     do {
         // Important: function overload constructs vector procedures each round.
-        solver.hull_reduce(domain,function,codomain);
-        if(definitely(domain.is_empty())) return true;
+        solver.hull_reduce(domain, function, codomain);
+        if (definitely(domain.is_empty()))
+            return true;
 
-        for(SizeType i=0; i!=codomain.size(); ++i) {
-            if(certified_satisfied[i]) continue;
-            if(definitely(subset(Ariadne::apply(function[i],domain),codomain[i]))) {
-                certified_satisfied[i]=true;
+        for (SizeType i = 0; i != codomain.size(); ++i) {
+            if (certified_satisfied[i])
+                continue;
+            if (definitely(subset(Ariadne::apply(function[i], domain), codomain[i]))) {
+                certified_satisfied[i] = true;
                 continue;
             }
-            for(SizeType j=0; j!=domain.size(); ++j) {
-                solver.box_reduce(domain,function[i],codomain[i],j);
-                if(definitely(domain.is_empty())) return true;
+            for (SizeType j = 0; j != domain.size(); ++j) {
+                solver.box_reduce(domain, function[i], codomain[i], j);
+                if (definitely(domain.is_empty()))
+                    return true;
             }
         }
-        old_domain_magnitude=domain_magnitude;
-        domain_magnitude=0u;
-        for(SizeType j=0; j!=domain.size(); ++j)
-            domain_magnitude+=domain[j].width();
-    } while(domain_magnitude.raw()
-            < mul(near,old_domain_magnitude.raw(),
-                  FloatDP(MINIMUM_REDUCTION,dp)));
+        old_domain_magnitude = domain_magnitude;
+        domain_magnitude = 0u;
+        for (SizeType j = 0; j != domain.size(); ++j)
+            domain_magnitude += domain[j].width();
+    } while (domain_magnitude.raw() < mul(near, old_domain_magnitude.raw(),
+                                          FloatDP(MINIMUM_REDUCTION, dp)));
     return false;
 }
 
 struct PreparedHullStatistics {
-    SizeType calls=0u;
-    SizeType hull_rounds=0u;
-    SizeType guard_tests=0u;
-    SizeType certificates=0u;
-    SizeType cached_certificates=0u;
-    SizeType box_calls=0u;
+    SizeType calls = 0u;
+    SizeType hull_rounds = 0u;
+    SizeType guard_tests = 0u;
+    SizeType certificates = 0u;
+    SizeType cached_certificates = 0u;
+    SizeType box_calls = 0u;
 };
 
 Bool reduce_with_precompiled_hull(
-        ConstraintSolver const& solver,UpperBoxType& domain,
-        ValidatedVectorMultivariateFunction const& function,
-        ExactBoxType const& codomain,
-        Vector<ValidatedProcedure> const& hull_procedure,
-        PreparedHullStatistics* stats=nullptr) {
-    const ExactDouble MINIMUM_REDUCTION=0.75_x;
-    if(stats) ++stats->calls;
-    if(definitely(domain.is_empty())) return true;
+    const ConstraintSolver& solver, UpperBoxType& domain,
+    const ValidatedVectorMultivariateFunction& function,
+    const ExactBoxType& codomain,
+    const Vector<ValidatedProcedure>& hull_procedure,
+    PreparedHullStatistics* stats = nullptr) {
+    const ExactDouble MINIMUM_REDUCTION = 0.75_x;
+    if (stats)
+        ++stats->calls;
+    if (definitely(domain.is_empty()))
+        return true;
 
-    std::vector<Bool> certified_satisfied(codomain.size(),false);
-    FloatDPUpperBound domain_magnitude={0u,dp};
-    for(SizeType j=0u;j<domain.size();++j)
-        domain_magnitude+=domain[j].width();
-    FloatDPUpperBound old_domain_magnitude=domain_magnitude;
+    std::vector<Bool> certified_satisfied(codomain.size(), false);
+    FloatDPUpperBound domain_magnitude = {0u, dp};
+    for (SizeType j = 0u; j < domain.size(); ++j)
+        domain_magnitude += domain[j].width();
+    FloatDPUpperBound old_domain_magnitude = domain_magnitude;
 
     do {
-        if(stats) ++stats->hull_rounds;
-        solver.hull_reduce(domain,hull_procedure,codomain);
-        if(definitely(domain.is_empty())) return true;
+        if (stats)
+            ++stats->hull_rounds;
+        solver.hull_reduce(domain, hull_procedure, codomain);
+        if (definitely(domain.is_empty()))
+            return true;
 
-        for(SizeType i=0u;i<codomain.size();++i) {
-            if(certified_satisfied[i]) {
-                if(stats) ++stats->cached_certificates;
+        for (SizeType i = 0u; i < codomain.size(); ++i) {
+            if (certified_satisfied[i]) {
+                if (stats)
+                    ++stats->cached_certificates;
                 continue;
             }
-            if(stats) ++stats->guard_tests;
-            if(definitely(subset(Ariadne::apply(function[i],domain),
-                                 codomain[i]))) {
-                certified_satisfied[i]=true;
-                if(stats) ++stats->certificates;
+            if (stats)
+                ++stats->guard_tests;
+            if (definitely(subset(Ariadne::apply(function[i], domain),
+                                  codomain[i]))) {
+                certified_satisfied[i] = true;
+                if (stats)
+                    ++stats->certificates;
                 continue;
             }
-            for(SizeType j=0u;j<domain.size();++j) {
-                if(stats) ++stats->box_calls;
-                solver.box_reduce(domain,function[i],codomain[i],j);
-                if(definitely(domain.is_empty())) return true;
+            for (SizeType j = 0u; j < domain.size(); ++j) {
+                if (stats)
+                    ++stats->box_calls;
+                solver.box_reduce(domain, function[i], codomain[i], j);
+                if (definitely(domain.is_empty()))
+                    return true;
             }
         }
-        old_domain_magnitude=domain_magnitude;
-        domain_magnitude=0u;
-        for(SizeType j=0u;j<domain.size();++j)
-            domain_magnitude+=domain[j].width();
-    } while(domain_magnitude.raw()
-            < mul(near,old_domain_magnitude.raw(),
-                  FloatDP(MINIMUM_REDUCTION,dp)));
+        old_domain_magnitude = domain_magnitude;
+        domain_magnitude = 0u;
+        for (SizeType j = 0u; j < domain.size(); ++j)
+            domain_magnitude += domain[j].width();
+    } while (domain_magnitude.raw() < mul(near, old_domain_magnitude.raw(),
+                                          FloatDP(MINIMUM_REDUCTION, dp)));
     return false;
 }
 
 struct PreparedHullRow {
     std::string shape;
-    SizeType queries=0u;
-    SizeType separated=0u;
+    SizeType queries = 0u;
+    SizeType separated = 0u;
     PreparedHullStatistics schedule;
-    double p1_ms=0.0;
-    double per_query_ms=0.0;
-    double prepared_ms=0.0;
-    double compile_once_ms=0.0;
-    double batch_ms=0.0;
-    SizeType batch_preparations=0u;
-    unsigned p1_iterations=0u;
-    unsigned per_query_iterations=0u;
-    unsigned prepared_iterations=0u;
+    double p1_ms = 0.0;
+    double per_query_ms = 0.0;
+    double prepared_ms = 0.0;
+    double compile_once_ms = 0.0;
+    double batch_ms = 0.0;
+    SizeType batch_preparations = 0u;
+    unsigned p1_iterations = 0u;
+    unsigned per_query_iterations = 0u;
+    unsigned prepared_iterations = 0u;
 };
 
 PreparedHullRow compare_precompiled_hull(
-        Selection const& selection,std::string const& shape) {
-    SolverProblem problem=make_problem(shape);
-    auto const trace=read_adaptive_trace(selection.trace_prefix,shape);
+    const Selection& selection, const std::string& shape) {
+    SolverProblem problem = make_problem(shape);
+    const auto trace = read_adaptive_trace(selection.trace_prefix, shape);
     std::vector<ExactBoxType> codomains;
     codomains.reserve(trace.size());
-    for(auto const& record:trace) {
-        ExactBoxType codomain=problem.codomains.front();
-        for(SizeType j=0u;j<4u;++j) codomain[j]=record.box[j];
+    for (const auto& record: trace) {
+        ExactBoxType codomain = problem.codomains.front();
+        for (SizeType j = 0u; j < 4u; ++j)
+            codomain[j] = record.box[j];
         codomains.push_back(std::move(codomain));
     }
     ConstraintSolver solver;
     // Prepared-function lifetime covers all queries in this benchmark
     // workload. No procedures cross function/shape/precision boundaries.
-    Vector<ValidatedProcedure> const prepared(problem.function);
+    const Vector<ValidatedProcedure> prepared(problem.function);
     PreparedHullRow row;
-    row.shape=shape;
-    row.queries=trace.size();
-    for(SizeType q=0u;q<trace.size();++q) {
-        auto const& codomain=codomains[q];
-        UpperBoxType baseline=problem.initial_domain;
+    row.shape = shape;
+    row.queries = trace.size();
+    for (SizeType q = 0u; q < trace.size(); ++q) {
+        const auto& codomain = codomains[q];
+        UpperBoxType baseline = problem.initial_domain;
         reduce_pre_p6_reference(
-            solver,baseline,problem.function,codomain);
-        UpperBoxType legacy=problem.initial_domain;
-        reduce_full_scan_reference(solver,legacy,problem.function,codomain);
-        UpperBoxType production=problem.initial_domain;
-        solver.reduce(production,problem.function,codomain);
-        if(not same(baseline,legacy)
-           or not same(baseline,production))
+            solver, baseline, problem.function, codomain);
+        UpperBoxType legacy = problem.initial_domain;
+        reduce_full_scan_reference(solver, legacy, problem.function, codomain);
+        UpperBoxType production = problem.initial_domain;
+        solver.reduce(production, problem.function, codomain);
+        if (not same(baseline, legacy) or not same(baseline, production))
             throw std::runtime_error(
                 "P6 current production differs from frozen pre-P6 P1"
-                " or full scan shape="+shape+" query="+std::to_string(q));
+                " or full scan shape=" +
+                shape + " query=" + std::to_string(q));
 
-        UpperBoxType per_query=problem.initial_domain;
-        Vector<ValidatedProcedure> const local(problem.function);
+        UpperBoxType per_query = problem.initial_domain;
+        const Vector<ValidatedProcedure> local(problem.function);
         reduce_with_precompiled_hull(
-            solver,per_query,problem.function,codomain,local);
-        UpperBoxType precompiled=problem.initial_domain;
+            solver, per_query, problem.function, codomain, local);
+        UpperBoxType precompiled = problem.initial_domain;
         reduce_with_precompiled_hull(
-            solver,precompiled,problem.function,codomain,prepared,
+            solver, precompiled, problem.function, codomain, prepared,
             &row.schedule);
-        if(not same(baseline,per_query)
-           or not same(baseline,precompiled)) {
+        if (not same(baseline, per_query) or not same(baseline, precompiled)) {
             throw std::runtime_error(
-                "P6 prepared hull changed exact final box shape="+shape
-                +" query="+std::to_string(q));
+                "P6 prepared hull changed exact final box shape=" + shape + " query=" + std::to_string(q));
         }
-        Bool const empty=definitely(baseline.is_empty());
-        if(empty!=trace[q].separated
-           or empty!=definitely(production.is_empty())
-           or empty!=definitely(per_query.is_empty())
-           or empty!=definitely(precompiled.is_empty()))
+        const Bool empty = definitely(baseline.is_empty());
+        if (empty != trace[q].separated or empty != definitely(production.is_empty()) or empty != definitely(per_query.is_empty()) or empty != definitely(precompiled.is_empty()))
             throw std::runtime_error(
                 "P6 prepared hull changed certified paving separation"
-                " shape="+shape+" query="+std::to_string(q));
-        row.separated+=static_cast<SizeType>(empty);
+                " shape=" +
+                shape + " query=" + std::to_string(q));
+        row.separated += static_cast<SizeType>(empty);
     }
-    if(row.schedule.calls!=trace.size()
-       or row.schedule.hull_rounds<trace.size())
+    if (row.schedule.calls != trace.size() or row.schedule.hull_rounds < trace.size())
         throw std::runtime_error("inconsistent P6 prepared hull counters");
     // An explicitly bounded preparation lifetime: each batch owns its
     // own immutable vector procedure, reused only for that query block.
     // Verify every resulting interval against the real production reduce(),
     // not merely by checking empty-result counts or a single witness.
-    if(selection.prepared_batch_size!=0u) {
-        SizeType verified=0u;
-        for(SizeType begin=0u;begin<codomains.size();) {
-            Vector<ValidatedProcedure> const batch_procedure(problem.function);
-            SizeType const end=std::min(
+    if (selection.prepared_batch_size != 0u) {
+        SizeType verified = 0u;
+        for (SizeType begin = 0u; begin < codomains.size();) {
+            const Vector<ValidatedProcedure> batch_procedure(problem.function);
+            const SizeType end = std::min(
                 codomains.size(),
-                begin+static_cast<SizeType>(selection.prepared_batch_size));
-            for(SizeType query=begin;query<end;++query) {
-                UpperBoxType candidate=problem.initial_domain;
+                begin + static_cast<SizeType>(selection.prepared_batch_size));
+            for (SizeType query = begin; query < end; ++query) {
+                UpperBoxType candidate = problem.initial_domain;
                 reduce_with_precompiled_hull(
-                    solver,candidate,problem.function,codomains[query],
+                    solver, candidate, problem.function, codomains[query],
                     batch_procedure);
-                UpperBoxType production=problem.initial_domain;
+                UpperBoxType production = problem.initial_domain;
                 solver.reduce(
-                    production,problem.function,codomains[query]);
-                if(not same(candidate,production)
-                   or definitely(candidate.is_empty())!=trace[query].separated)
+                    production, problem.function, codomains[query]);
+                if (not same(candidate, production) or definitely(candidate.is_empty()) != trace[query].separated)
                     throw std::runtime_error(
                         "P7 batch prepared hull differs from production"
-                        " shape="+shape+" query="+std::to_string(query));
+                        " shape=" +
+                        shape + " query=" + std::to_string(query));
                 ++verified;
             }
             ++row.batch_preparations;
-            begin=end;
+            begin = end;
         }
-        if(verified!=trace.size()
-           or row.batch_preparations!=
-              (trace.size()-1u)/selection.prepared_batch_size+1u)
+        if (verified != trace.size() or row.batch_preparations !=
+                                            (trace.size() - 1u) / selection.prepared_batch_size + 1u)
             throw std::runtime_error("P7 prepared batch verification counters");
-        LOGGING_PRINTLN("PREPARED_BATCH_VERIFIED shape="<<shape
-            <<" queries="<<verified
-            <<" batch_size="<<selection.prepared_batch_size
-            <<" preparations="<<row.batch_preparations
-            <<" matched_production=true matched_trace=true")
+        LOGGING_PRINTLN("PREPARED_BATCH_VERIFIED shape=" << shape
+                                                         << " queries=" << verified
+                                                         << " batch_size=" << selection.prepared_batch_size
+                                                         << " preparations=" << row.batch_preparations
+                                                         << " matched_production=true matched_trace=true")
     }
-    LOGGING_PRINTLN("PRECOMPILED_HULL_VERIFIED shape="<<shape
-        <<" queries="<<row.queries
-        <<" separated="<<row.separated
-        <<" hull_rounds="<<row.schedule.hull_rounds
-        <<" guard_tests="<<row.schedule.guard_tests
-        <<" certificates="<<row.schedule.certificates
-        <<" reused_certificates="<<row.schedule.cached_certificates
-        <<" box_calls="<<row.schedule.box_calls
-        <<" matched_p1=true matched_legacy=true matched_trace=true"
-        <<" matched_pre_p6=true matched_current_production=true")
-    if(selection.verify_only) return row;
+    LOGGING_PRINTLN("PRECOMPILED_HULL_VERIFIED shape=" << shape
+                                                       << " queries=" << row.queries
+                                                       << " separated=" << row.separated
+                                                       << " hull_rounds=" << row.schedule.hull_rounds
+                                                       << " guard_tests=" << row.schedule.guard_tests
+                                                       << " certificates=" << row.schedule.certificates
+                                                       << " reused_certificates=" << row.schedule.cached_certificates
+                                                       << " box_calls=" << row.schedule.box_calls
+                                                       << " matched_p1=true matched_legacy=true matched_trace=true"
+                                                       << " matched_pre_p6=true matched_current_production=true")
+    if (selection.verify_only)
+        return row;
 
     // Timed workloads each include all query setup/reduction/cleanup.
     // "per_query" builds once per reduce() call but reuses across rounds.
     // "prepared" reuses one vector of procedures for the entire shape.
-    auto timed=[&](unsigned variant)->SizeType {
-        SizeType separated=0u;
-        if(variant==3u) {
+    auto timed = [&](unsigned variant) -> SizeType {
+        SizeType separated = 0u;
+        if (variant == 3u) {
             // Unlike prepared-hot, this measures preparation *inside*
             // every timed full-trace sweep, once per bounded query block.
-            for(SizeType begin=0u;begin<codomains.size();) {
-                Vector<ValidatedProcedure> const batch_procedure(
+            for (SizeType begin = 0u; begin < codomains.size();) {
+                const Vector<ValidatedProcedure> batch_procedure(
                     problem.function);
-                SizeType const end=std::min(
+                const SizeType end = std::min(
                     codomains.size(),
-                    begin+static_cast<SizeType>(selection.prepared_batch_size));
-                for(SizeType query=begin;query<end;++query) {
-                    UpperBoxType domain=problem.initial_domain;
+                    begin + static_cast<SizeType>(selection.prepared_batch_size));
+                for (SizeType query = begin; query < end; ++query) {
+                    UpperBoxType domain = problem.initial_domain;
                     reduce_with_precompiled_hull(
-                        solver,domain,problem.function,codomains[query],
+                        solver, domain, problem.function, codomains[query],
                         batch_procedure);
-                    separated+=static_cast<SizeType>(
+                    separated += static_cast<SizeType>(
                         definitely(domain.is_empty()));
                     keep_alive(domain);
                 }
-                begin=end;
+                begin = end;
             }
             return separated;
         }
-        for(auto const& codomain:codomains) {
-            UpperBoxType domain=problem.initial_domain;
-            if(variant==0u) {
+        for (const auto& codomain: codomains) {
+            UpperBoxType domain = problem.initial_domain;
+            if (variant == 0u) {
                 reduce_pre_p6_reference(
-                    solver,domain,problem.function,codomain);
-            } else if(variant==1u) {
+                    solver, domain, problem.function, codomain);
+            } else if (variant == 1u) {
                 // Measure the actual production implementation of P6.
-                solver.reduce(domain,problem.function,codomain);
+                solver.reduce(domain, problem.function, codomain);
             } else {
                 reduce_with_precompiled_hull(
-                    solver,domain,problem.function,codomain,prepared);
+                    solver, domain, problem.function, codomain, prepared);
             }
-            separated+=static_cast<SizeType>(definitely(domain.is_empty()));
+            separated += static_cast<SizeType>(definitely(domain.is_empty()));
             keep_alive(domain);
         }
         return separated;
     };
-    for(unsigned variant=0u;variant<3u;++variant)
-        if(timed(variant)!=row.separated)
+    for (unsigned variant = 0u; variant < 3u; ++variant)
+        if (timed(variant) != row.separated)
             throw std::runtime_error(
                 "P6 timed query checksum disagrees with verification"
-                " shape="+shape+" variant="+std::to_string(variant));
-    if(selection.prepared_batch_size!=0u
-       and timed(3u)!=row.separated)
+                " shape=" +
+                shape + " variant=" + std::to_string(variant));
+    if (selection.prepared_batch_size != 0u and timed(3u) != row.separated)
         throw std::runtime_error(
-            "P7 prepared batch timed checksum mismatch shape="+shape);
+            "P7 prepared batch timed checksum mismatch shape=" + shape);
 
-    Timing const p1=median_ms([&]{return timed(0u);},selection);
-    Timing const per_query=median_ms([&]{return timed(1u);},selection);
-    Timing const shared=median_ms([&]{return timed(2u);},selection);
+    const Timing p1 = median_ms([&] { return timed(0u); }, selection);
+    const Timing per_query = median_ms([&] { return timed(1u); }, selection);
+    const Timing shared = median_ms([&] { return timed(2u); }, selection);
     // A separate calibrated one-off constructor estimate: never silently
     // equate the warmed prepared benchmark with end-to-end cold startup.
-    Timing const build=median_ms([&]()->SizeType {
-        Vector<ValidatedProcedure> const local(problem.function);
+    const Timing build = median_ms([&]() -> SizeType {
+        const Vector<ValidatedProcedure> local(problem.function);
         keep_alive(local);
         return local.result_size();
-    },selection);
-    row.p1_ms=p1.milliseconds;
-    row.per_query_ms=per_query.milliseconds;
-    row.prepared_ms=shared.milliseconds;
-    row.compile_once_ms=build.milliseconds;
-    if(selection.prepared_batch_size!=0u) {
-        Timing const batched=median_ms([&]{return timed(3u);},selection);
-        row.batch_ms=batched.milliseconds;
-        if(not std::isfinite(row.batch_ms) or row.batch_ms<=0.0)
+    },
+                                   selection);
+    row.p1_ms = p1.milliseconds;
+    row.per_query_ms = per_query.milliseconds;
+    row.prepared_ms = shared.milliseconds;
+    row.compile_once_ms = build.milliseconds;
+    if (selection.prepared_batch_size != 0u) {
+        const Timing batched = median_ms([&] { return timed(3u); }, selection);
+        row.batch_ms = batched.milliseconds;
+        if (not std::isfinite(row.batch_ms) or row.batch_ms <= 0.0)
             throw std::runtime_error(
-                "P7 invalid batched prepared timing shape="+shape);
-        LOGGING_PRINTLN("PREPARED_BATCH_COMPARE shape="<<shape
-            <<" queries="<<row.queries
-            <<" batch_size="<<selection.prepared_batch_size
-            <<" preparations="<<row.batch_preparations
-            <<" current_p1_ms="<<std::fixed<<std::setprecision(5)
-                <<row.per_query_ms
-            <<" batch_ms="<<row.batch_ms
-            <<" prepared_hot_ms="<<row.prepared_ms
-            <<" batch_speedup_over_current_p1="
-                <<(row.per_query_ms/row.batch_ms)
-            <<" preparation_in_timed_sweep=true")
+                "P7 invalid batched prepared timing shape=" + shape);
+        LOGGING_PRINTLN("PREPARED_BATCH_COMPARE shape=" << shape
+                                                        << " queries=" << row.queries
+                                                        << " batch_size=" << selection.prepared_batch_size
+                                                        << " preparations=" << row.batch_preparations
+                                                        << " current_p1_ms=" << std::fixed << std::setprecision(5)
+                                                        << row.per_query_ms
+                                                        << " batch_ms=" << row.batch_ms
+                                                        << " prepared_hot_ms=" << row.prepared_ms
+                                                        << " batch_speedup_over_current_p1="
+                                                        << (row.per_query_ms / row.batch_ms)
+                                                        << " preparation_in_timed_sweep=true")
     }
-    row.p1_iterations=p1.iterations;
-    row.per_query_iterations=per_query.iterations;
-    row.prepared_iterations=shared.iterations;
-    for(double const x:{row.p1_ms,row.per_query_ms,
-                        row.prepared_ms,row.compile_once_ms})
-        if(not std::isfinite(x) or x<=0.0)
+    row.p1_iterations = p1.iterations;
+    row.per_query_iterations = per_query.iterations;
+    row.prepared_iterations = shared.iterations;
+    for (const double x: {row.p1_ms, row.per_query_ms,
+                          row.prepared_ms, row.compile_once_ms})
+        if (not std::isfinite(x) or x <= 0.0)
             throw std::runtime_error(
-                "P6 invalid timing shape="+shape);
-    LOGGING_PRINTLN("PRECOMPILED_HULL_COMPARE shape="<<shape
-        <<" queries="<<row.queries
-        <<" p1_ms="<<std::fixed<<std::setprecision(5)<<row.p1_ms
-        <<" per_query_ms="<<row.per_query_ms
-        <<" prepared_ms="<<row.prepared_ms
-        <<" compile_once_ms="<<row.compile_once_ms
-        <<" per_query_speedup="<<(row.p1_ms/row.per_query_ms)
-        <<" prepared_hot_speedup="<<(row.p1_ms/row.prepared_ms)
-        <<" prepared_amortized_speedup="
-              <<(row.p1_ms/(row.prepared_ms+row.compile_once_ms))
-        <<" baseline=frozen_pre_p6_p1"
-        <<" per_query=current_production_reduce"
-        <<" samples="<<selection.samples)
+                "P6 invalid timing shape=" + shape);
+    LOGGING_PRINTLN("PRECOMPILED_HULL_COMPARE shape=" << shape
+                                                      << " queries=" << row.queries
+                                                      << " p1_ms=" << std::fixed << std::setprecision(5) << row.p1_ms
+                                                      << " per_query_ms=" << row.per_query_ms
+                                                      << " prepared_ms=" << row.prepared_ms
+                                                      << " compile_once_ms=" << row.compile_once_ms
+                                                      << " per_query_speedup=" << (row.p1_ms / row.per_query_ms)
+                                                      << " prepared_hot_speedup=" << (row.p1_ms / row.prepared_ms)
+                                                      << " prepared_amortized_speedup="
+                                                      << (row.p1_ms / (row.prepared_ms + row.compile_once_ms))
+                                                      << " baseline=frozen_pre_p6_p1"
+                                                      << " per_query=current_production_reduce"
+                                                      << " samples=" << selection.samples)
     return row;
 }
 
 void print_precompiled_hull_report(
-        std::vector<PreparedHullRow> const& rows,Selection const& selection) {
-    if(rows.empty()) throw std::runtime_error("empty P6 benchmark");
+    const std::vector<PreparedHullRow>& rows, const Selection& selection) {
+    if (rows.empty())
+        throw std::runtime_error("empty P6 benchmark");
     LOGGING_PRINTLN(" ")
     LOGGING_PRINTLN("Pre-P6 P1 / current P1 / prepared vector hull | d=4 f=3"
-                   <<" | shapes="<<rows.size()
-                   <<" | samples="<<selection.samples)
+                    << " | shapes=" << rows.size()
+                    << " | samples=" << selection.samples)
     LOGGING_PRINTLN("Current production and prepared variants match"
-                   " frozen pre-P6 P1, full scan and paving separation bits.")
-    if(selection.verify_only) {
-        if(selection.prepared_batch_size!=0u) {
-            SizeType total_queries=0u,total_preparations=0u;
-            for(auto const& item:rows) {
-                total_queries+=item.queries;
-                total_preparations+=item.batch_preparations;
+                    " frozen pre-P6 P1, full scan and paving separation bits.")
+    if (selection.verify_only) {
+        if (selection.prepared_batch_size != 0u) {
+            SizeType total_queries = 0u, total_preparations = 0u;
+            for (const auto& item: rows) {
+                total_queries += item.queries;
+                total_preparations += item.batch_preparations;
             }
             LOGGING_PRINTLN("PREPARED_BATCH_VERIFICATION_TOTAL shapes="
-                <<rows.size()<<" queries="<<total_queries
-                <<" batch_size="<<selection.prepared_batch_size
-                <<" preparations="<<total_preparations
-                <<" matched_production=true")
+                            << rows.size() << " queries=" << total_queries
+                            << " batch_size=" << selection.prepared_batch_size
+                            << " preparations=" << total_preparations
+                            << " matched_production=true")
         }
         LOGGING_PRINTLN("Correctness-only replay; timing not collected.")
         return;
     }
 
-    LOGGING_PRINTLN(std::string(112u,'='))
-    LOGGING_PRINTLN(std::left<<std::setw(20)<<"Shape"
-        <<std::right<<std::setw(13)<<"Old P1 (ms)"
-        <<std::setw(17)<<"Current P1 (ms)"
-        <<std::setw(17)<<"Prepared (ms)"
-        <<std::setw(17)<<"Build (ms)"
-        <<std::setw(14)<<"Query/P1"
-        <<std::setw(14)<<"Warm/P1")
-    LOGGING_PRINTLN(std::string(112u,'-'))
-    double log_query=0.0,log_warm=0.0,log_amortized=0.0;
-    double total_p1=0.0,total_query=0.0,total_prepared=0.0;
-    double total_build=0.0;
-    SizeType total_queries=0u,total_rounds=0u;
-    for(auto const& row:rows) {
-        total_p1+=row.p1_ms;
-        total_query+=row.per_query_ms;
-        total_prepared+=row.prepared_ms;
-        total_build+=row.compile_once_ms;
-        total_queries+=row.queries;
-        total_rounds+=row.schedule.hull_rounds;
-        log_query+=std::log(row.p1_ms/row.per_query_ms);
-        log_warm+=std::log(row.p1_ms/row.prepared_ms);
-        log_amortized+=std::log(
-            row.p1_ms/(row.prepared_ms+row.compile_once_ms));
-        LOGGING_PRINTLN(std::left<<std::setw(20)<<row.shape
-            <<std::right<<std::fixed<<std::setprecision(4)
-            <<std::setw(13)<<row.p1_ms
-            <<std::setw(17)<<row.per_query_ms
-            <<std::setw(17)<<row.prepared_ms
-            <<std::setw(17)<<row.compile_once_ms
-            <<std::setprecision(3)
-            <<std::setw(13)<<(row.p1_ms/row.per_query_ms)<<"x"
-            <<std::setw(13)<<(row.p1_ms/row.prepared_ms)<<"x")
+    LOGGING_PRINTLN(std::string(112u, '='))
+    LOGGING_PRINTLN(std::left << std::setw(20) << "Shape"
+                              << std::right << std::setw(13) << "Old P1 (ms)"
+                              << std::setw(17) << "Current P1 (ms)"
+                              << std::setw(17) << "Prepared (ms)"
+                              << std::setw(17) << "Build (ms)"
+                              << std::setw(14) << "Query/P1"
+                              << std::setw(14) << "Warm/P1")
+    LOGGING_PRINTLN(std::string(112u, '-'))
+    double log_query = 0.0, log_warm = 0.0, log_amortized = 0.0;
+    double total_p1 = 0.0, total_query = 0.0, total_prepared = 0.0;
+    double total_build = 0.0;
+    SizeType total_queries = 0u, total_rounds = 0u;
+    for (const auto& row: rows) {
+        total_p1 += row.p1_ms;
+        total_query += row.per_query_ms;
+        total_prepared += row.prepared_ms;
+        total_build += row.compile_once_ms;
+        total_queries += row.queries;
+        total_rounds += row.schedule.hull_rounds;
+        log_query += std::log(row.p1_ms / row.per_query_ms);
+        log_warm += std::log(row.p1_ms / row.prepared_ms);
+        log_amortized += std::log(
+            row.p1_ms / (row.prepared_ms + row.compile_once_ms));
+        LOGGING_PRINTLN(std::left << std::setw(20) << row.shape
+                                  << std::right << std::fixed << std::setprecision(4)
+                                  << std::setw(13) << row.p1_ms
+                                  << std::setw(17) << row.per_query_ms
+                                  << std::setw(17) << row.prepared_ms
+                                  << std::setw(17) << row.compile_once_ms
+                                  << std::setprecision(3)
+                                  << std::setw(13) << (row.p1_ms / row.per_query_ms) << "x"
+                                  << std::setw(13) << (row.p1_ms / row.prepared_ms) << "x")
     }
-    double const n=static_cast<double>(rows.size());
-    LOGGING_PRINTLN(std::string(112u,'='))
-    LOGGING_PRINTLN("PRECOMPILED_HULL_AGGREGATE shapes="<<rows.size()
-        <<" queries="<<total_queries<<" hull_rounds="<<total_rounds
-        <<" p1_sum_ms="<<std::fixed<<std::setprecision(5)<<total_p1
-        <<" per_query_sum_ms="<<total_query
-        <<" prepared_sum_ms="<<total_prepared
-        <<" compile_once_sum_ms="<<total_build
-        <<" prepared_amortized_sum_ms="<<(total_prepared+total_build)
-        <<" per_query_geomean_speedup="<<std::exp(log_query/n)
-        <<" prepared_hot_geomean_speedup="<<std::exp(log_warm/n)
-        <<" prepared_amortized_geomean_speedup="<<std::exp(log_amortized/n)
-        <<" per_query_total_speedup="<<(total_p1/total_query)
-        <<" prepared_hot_total_speedup="<<(total_p1/total_prepared)
-        <<" prepared_amortized_total_speedup="
-            <<(total_p1/(total_prepared+total_build)))
-    if(selection.prepared_batch_size!=0u) {
-        double current_sum_ms=0.0;
-        double batch_sum_ms=0.0;
-        SizeType batch_queries=0u,total_preparations=0u;
-        double log_speedup=0.0;
+    const double n = static_cast<double>(rows.size());
+    LOGGING_PRINTLN(std::string(112u, '='))
+    LOGGING_PRINTLN("PRECOMPILED_HULL_AGGREGATE shapes=" << rows.size()
+                                                         << " queries=" << total_queries << " hull_rounds=" << total_rounds
+                                                         << " p1_sum_ms=" << std::fixed << std::setprecision(5) << total_p1
+                                                         << " per_query_sum_ms=" << total_query
+                                                         << " prepared_sum_ms=" << total_prepared
+                                                         << " compile_once_sum_ms=" << total_build
+                                                         << " prepared_amortized_sum_ms=" << (total_prepared + total_build)
+                                                         << " per_query_geomean_speedup=" << std::exp(log_query / n)
+                                                         << " prepared_hot_geomean_speedup=" << std::exp(log_warm / n)
+                                                         << " prepared_amortized_geomean_speedup=" << std::exp(log_amortized / n)
+                                                         << " per_query_total_speedup=" << (total_p1 / total_query)
+                                                         << " prepared_hot_total_speedup=" << (total_p1 / total_prepared)
+                                                         << " prepared_amortized_total_speedup="
+                                                         << (total_p1 / (total_prepared + total_build)))
+    if (selection.prepared_batch_size != 0u) {
+        double current_sum_ms = 0.0;
+        double batch_sum_ms = 0.0;
+        SizeType batch_queries = 0u, total_preparations = 0u;
+        double log_speedup = 0.0;
         LOGGING_PRINTLN(" ")
         LOGGING_PRINTLN("Bounded prepared-procedure reuse: batch size "
-            <<selection.prepared_batch_size
-            <<" (construction INCLUDED in each timed full-trace sweep)")
-        LOGGING_PRINTLN(std::string(83u,'-'))
-        LOGGING_PRINTLN(std::left<<std::setw(22)<<"Shape"
-            <<std::right<<std::setw(16)<<"P1 (ms)"
-            <<std::setw(17)<<"Batched (ms)"
-            <<std::setw(16)<<"Batch / P1"
-            <<std::setw(12)<<"Builds")
-        for(auto const& item:rows) {
-            current_sum_ms+=item.per_query_ms;
-            batch_sum_ms+=item.batch_ms;
-            batch_queries+=item.queries;
-            total_preparations+=item.batch_preparations;
-            double const speedup=item.per_query_ms/item.batch_ms;
-            log_speedup+=std::log(speedup);
-            LOGGING_PRINTLN(std::left<<std::setw(22)<<item.shape
-                <<std::right<<std::fixed<<std::setprecision(4)
-                <<std::setw(16)<<item.per_query_ms
-                <<std::setw(17)<<item.batch_ms
-                <<std::setw(15)<<speedup<<"x"
-                <<std::setw(12)<<item.batch_preparations)
+                        << selection.prepared_batch_size
+                        << " (construction INCLUDED in each timed full-trace sweep)")
+        LOGGING_PRINTLN(std::string(83u, '-'))
+        LOGGING_PRINTLN(std::left << std::setw(22) << "Shape"
+                                  << std::right << std::setw(16) << "P1 (ms)"
+                                  << std::setw(17) << "Batched (ms)"
+                                  << std::setw(16) << "Batch / P1"
+                                  << std::setw(12) << "Builds")
+        for (const auto& item: rows) {
+            current_sum_ms += item.per_query_ms;
+            batch_sum_ms += item.batch_ms;
+            batch_queries += item.queries;
+            total_preparations += item.batch_preparations;
+            const double speedup = item.per_query_ms / item.batch_ms;
+            log_speedup += std::log(speedup);
+            LOGGING_PRINTLN(std::left << std::setw(22) << item.shape
+                                      << std::right << std::fixed << std::setprecision(4)
+                                      << std::setw(16) << item.per_query_ms
+                                      << std::setw(17) << item.batch_ms
+                                      << std::setw(15) << speedup << "x"
+                                      << std::setw(12) << item.batch_preparations)
         }
-        LOGGING_PRINTLN(std::string(83u,'-'))
-        LOGGING_PRINTLN("PREPARED_BATCH_AGGREGATE shapes="<<rows.size()
-            <<" queries="<<batch_queries
-            <<" batch_size="<<selection.prepared_batch_size
-            <<" preparations="<<total_preparations
-            <<" current_p1_sum_ms="<<std::fixed<<std::setprecision(5)
-                <<current_sum_ms
-            <<" batch_sum_ms="<<batch_sum_ms
-            <<" total_speedup="<<(current_sum_ms/batch_sum_ms)
-            <<" geomean_speedup="
-                <<std::exp(log_speedup/static_cast<double>(rows.size()))
-            <<" preparation_in_timed_sweep=true")
+        LOGGING_PRINTLN(std::string(83u, '-'))
+        LOGGING_PRINTLN("PREPARED_BATCH_AGGREGATE shapes=" << rows.size()
+                                                           << " queries=" << batch_queries
+                                                           << " batch_size=" << selection.prepared_batch_size
+                                                           << " preparations=" << total_preparations
+                                                           << " current_p1_sum_ms=" << std::fixed << std::setprecision(5)
+                                                           << current_sum_ms
+                                                           << " batch_sum_ms=" << batch_sum_ms
+                                                           << " total_speedup=" << (current_sum_ms / batch_sum_ms)
+                                                           << " geomean_speedup="
+                                                           << std::exp(log_speedup / static_cast<double>(rows.size()))
+                                                           << " preparation_in_timed_sweep=true")
     }
     LOGGING_PRINTLN("Speedup >1 means faster than frozen pre-P6 production P1."
-                   " Per-query timing is the current production reduce()."
-                   " Prepared-hot timing excludes setup; amortized adds"
-                   " the separately calibrated one-build median per shape."
-                   " Sums of independently measured medians are not paired"
-                   " whole-program timings.")
+                    " Per-query timing is the current production reduce()."
+                    " Prepared-hot timing excludes setup; amortized adds"
+                    " the separately calibrated one-build median per shape."
+                    " Sums of independently measured medians are not paired"
+                    " whole-program timings.")
 }
 
 struct Datum {
@@ -3490,220 +3514,228 @@ struct Datum {
     Bench::Statistics statistics;
 };
 
-void append_case(std::vector<Datum>& data,Selection const& selection,
-                 std::string const& shape) {
-    SolverProblem problem=make_problem(shape);
+void append_case(std::vector<Datum>& data, const Selection& selection,
+                 const std::string& shape) {
+    SolverProblem problem = make_problem(shape);
     ConstraintSolver solver;
     // The library Vector<ValidatedProcedure> uses UniformArray, which
     // requires element characteristics unavailable for Procedure. Cache
     // procedures in std::vector and compare identical scalar hull passes.
     std::vector<ValidatedProcedure> compiled;
     compiled.reserve(problem.function.result_size());
-    for(SizeType i=0u;i<problem.function.result_size();++i) {
+    for (SizeType i = 0u; i < problem.function.result_size(); ++i) {
         compiled.emplace_back(problem.function[i]);
     }
     std::vector<UpperBoxType> after_hull;
     after_hull.reserve(problem.codomains.size());
-    SizeType full_empty=0u;
-    SizeType hull_empty=0u;
-    SizeType box_calls=0u;
+    SizeType full_empty = 0u;
+    SizeType hull_empty = 0u;
+    SizeType box_calls = 0u;
 
-    for(ExactBoxType const& target:problem.codomains) {
-        UpperBoxType direct=problem.initial_domain;
-        solver.reduce(direct,problem.function,target);
-        UpperBoxType repeat=problem.initial_domain;
-        solver.reduce(repeat,problem.function,target);
-        if(not same(direct,repeat))
+    for (const ExactBoxType& target: problem.codomains) {
+        UpperBoxType direct = problem.initial_domain;
+        solver.reduce(direct, problem.function, target);
+        UpperBoxType repeat = problem.initial_domain;
+        solver.reduce(repeat, problem.function, target);
+        if (not same(direct, repeat))
             throw std::runtime_error("nondeterministic full reduction");
-        full_empty+=static_cast<SizeType>(definitely(direct.is_empty()));
+        full_empty += static_cast<SizeType>(definitely(direct.is_empty()));
 
-        UpperBoxType ordinary=problem.initial_domain;
-        solver.hull_reduce(ordinary,problem.function,target);
-        hull_empty+=static_cast<SizeType>(definitely(ordinary.is_empty()));
+        UpperBoxType ordinary = problem.initial_domain;
+        solver.hull_reduce(ordinary, problem.function, target);
+        hull_empty += static_cast<SizeType>(definitely(ordinary.is_empty()));
         after_hull.push_back(std::move(ordinary));
 
         // Both scalar paths use the same sequence and stop condition.
-        UpperBoxType scalar_fresh=problem.initial_domain;
-        UpperBoxType scalar_cached=problem.initial_domain;
-        for(SizeType i=0u;i<target.size();++i) {
-            solver.hull_reduce(scalar_fresh,problem.function[i],target[i]);
-            solver.hull_reduce(scalar_cached,compiled[i],target[i]);
-            if(not same(scalar_fresh,scalar_cached))
+        UpperBoxType scalar_fresh = problem.initial_domain;
+        UpperBoxType scalar_cached = problem.initial_domain;
+        for (SizeType i = 0u; i < target.size(); ++i) {
+            solver.hull_reduce(scalar_fresh, problem.function[i], target[i]);
+            solver.hull_reduce(scalar_cached, compiled[i], target[i]);
+            if (not same(scalar_fresh, scalar_cached))
                 throw std::runtime_error(
                     "fresh and cached scalar hull steps disagree");
-            if(definitely(scalar_fresh.is_empty())) break;
+            if (definitely(scalar_fresh.is_empty()))
+                break;
         }
     }
     // Precomputed post-hull domains isolate a single subsequent box sweep.
     // The full reduce() may execute more than one hull/box round.
-    auto box_sweep=[&] {
-        SizeType empty=0u;
-        for(SizeType q=0u;q<problem.codomains.size();++q) {
-            UpperBoxType domain=after_hull[q];
-            if(not definitely(domain.is_empty())) {
-                ExactBoxType const& target=problem.codomains[q];
-                Bool done=false;
-                for(SizeType i=0u;i<target.size() and not done;++i) {
-                    for(SizeType j=0u;j<domain.size();++j) {
+    auto box_sweep = [&] {
+        SizeType empty = 0u;
+        for (SizeType q = 0u; q < problem.codomains.size(); ++q) {
+            UpperBoxType domain = after_hull[q];
+            if (not definitely(domain.is_empty())) {
+                const ExactBoxType& target = problem.codomains[q];
+                Bool done = false;
+                for (SizeType i = 0u; i < target.size() and not done; ++i) {
+                    for (SizeType j = 0u; j < domain.size(); ++j) {
                         ++box_calls;
-                        solver.box_reduce(domain,problem.function[i],target[i],j);
-                        if(definitely(domain.is_empty())) {
-                            done=true;
+                        solver.box_reduce(domain, problem.function[i], target[i], j);
+                        if (definitely(domain.is_empty())) {
+                            done = true;
                             break;
                         }
                     }
                 }
             }
-            empty+=static_cast<SizeType>(definitely(domain.is_empty()));
+            empty += static_cast<SizeType>(definitely(domain.is_empty()));
             keep_alive(domain);
         }
         return empty;
     };
     // Verify determinism and preconditioned behavior before timing.
-    SizeType box_empty=box_sweep();
-    if(box_sweep()!=box_empty)
+    SizeType box_empty = box_sweep();
+    if (box_sweep() != box_empty)
         throw std::runtime_error("nondeterministic box sweep");
-    SizeType initial_box_calls=box_calls;
-    if(selection.verify_only) {
-        std::cout<<"VERIFIED shape="<<shape
-                 <<" queries="<<problem.codomains.size()
-                 <<" constraints="<<problem.constraints_count
-                 <<" full_empty="<<full_empty
-                 <<" hull_empty="<<hull_empty
-                 <<" box_sweep_empty="<<box_empty
-                 <<" box_calls_per_sweep="<<initial_box_calls/2u
-                 <<"\n";
+    SizeType initial_box_calls = box_calls;
+    if (selection.verify_only) {
+        std::cout << "VERIFIED shape=" << shape
+                  << " queries=" << problem.codomains.size()
+                  << " constraints=" << problem.constraints_count
+                  << " full_empty=" << full_empty
+                  << " hull_empty=" << hull_empty
+                  << " box_sweep_empty=" << box_empty
+                  << " box_calls_per_sweep=" << initial_box_calls / 2u
+                  << "\n";
         return;
     }
 
-    auto full=[&] {
-        SizeType empty=0u;
-        for(ExactBoxType const& target:problem.codomains) {
-            UpperBoxType domain=problem.initial_domain;
-            solver.reduce(domain,problem.function,target);
-            empty+=static_cast<SizeType>(definitely(domain.is_empty()));
+    auto full = [&] {
+        SizeType empty = 0u;
+        for (const ExactBoxType& target: problem.codomains) {
+            UpperBoxType domain = problem.initial_domain;
+            solver.reduce(domain, problem.function, target);
+            empty += static_cast<SizeType>(definitely(domain.is_empty()));
             keep_alive(domain);
         }
         return empty;
     };
-    auto hull_fresh=[&] {
-        SizeType empty=0u;
-        for(ExactBoxType const& target:problem.codomains) {
-            UpperBoxType domain=problem.initial_domain;
-            solver.hull_reduce(domain,problem.function,target);
-            empty+=static_cast<SizeType>(definitely(domain.is_empty()));
+    auto hull_fresh = [&] {
+        SizeType empty = 0u;
+        for (const ExactBoxType& target: problem.codomains) {
+            UpperBoxType domain = problem.initial_domain;
+            solver.hull_reduce(domain, problem.function, target);
+            empty += static_cast<SizeType>(definitely(domain.is_empty()));
             keep_alive(domain);
         }
         return empty;
     };
-    auto hull_scalar_fresh=[&] {
-        SizeType empty=0u;
-        for(ExactBoxType const& target:problem.codomains) {
-            UpperBoxType domain=problem.initial_domain;
-            for(SizeType i=0u;i<target.size();++i) {
-                solver.hull_reduce(domain,problem.function[i],target[i]);
-                if(definitely(domain.is_empty())) break;
+    auto hull_scalar_fresh = [&] {
+        SizeType empty = 0u;
+        for (const ExactBoxType& target: problem.codomains) {
+            UpperBoxType domain = problem.initial_domain;
+            for (SizeType i = 0u; i < target.size(); ++i) {
+                solver.hull_reduce(domain, problem.function[i], target[i]);
+                if (definitely(domain.is_empty()))
+                    break;
             }
-            empty+=static_cast<SizeType>(definitely(domain.is_empty()));
+            empty += static_cast<SizeType>(definitely(domain.is_empty()));
             keep_alive(domain);
         }
         return empty;
     };
-    auto hull_scalar_cached=[&] {
-        SizeType empty=0u;
-        for(ExactBoxType const& target:problem.codomains) {
-            UpperBoxType domain=problem.initial_domain;
-            for(SizeType i=0u;i<target.size();++i) {
-                solver.hull_reduce(domain,compiled[i],target[i]);
-                if(definitely(domain.is_empty())) break;
+    auto hull_scalar_cached = [&] {
+        SizeType empty = 0u;
+        for (const ExactBoxType& target: problem.codomains) {
+            UpperBoxType domain = problem.initial_domain;
+            for (SizeType i = 0u; i < target.size(); ++i) {
+                solver.hull_reduce(domain, compiled[i], target[i]);
+                if (definitely(domain.is_empty()))
+                    break;
             }
-            empty+=static_cast<SizeType>(definitely(domain.is_empty()));
+            empty += static_cast<SizeType>(definitely(domain.is_empty()));
             keep_alive(domain);
         }
         return empty;
     };
-    SizeType scalar_empty=hull_scalar_fresh();
-    if(full()!=full_empty or hull_fresh()!=hull_empty
-       or hull_scalar_cached()!=scalar_empty or box_sweep()!=box_empty)
+    SizeType scalar_empty = hull_scalar_fresh();
+    if (full() != full_empty or hull_fresh() != hull_empty or hull_scalar_cached() != scalar_empty or box_sweep() != box_empty)
         throw std::runtime_error("reduction checksum mismatch");
 
-    auto record=[&](char const* operation,auto&& workload) {
-        Timing timing=median_ms(workload,selection,shape+"/"+operation);
-        data.push_back({shape,operation,timing.milliseconds,
+    auto record = [&](const char* operation, auto&& workload) {
+        Timing timing = median_ms(workload, selection, shape + "/" + operation);
+        data.push_back({shape, operation, timing.milliseconds,
                         problem.codomains.size(),
-                        problem.constraints_count,timing.iterations,
+                        problem.constraints_count, timing.iterations,
                         timing.statistics});
     };
-    record("reduce_full",full);
-    record("hull_vector_fresh",hull_fresh);
-    record("hull_scalar_fresh",hull_scalar_fresh);
-    record("hull_scalar_cached",hull_scalar_cached);
-    record("box_sweep_post_hull",box_sweep);
+    record("reduce_full", full);
+    record("hull_vector_fresh", hull_fresh);
+    record("hull_scalar_fresh", hull_scalar_fresh);
+    record("hull_scalar_cached", hull_scalar_cached);
+    record("box_sweep_post_hull", box_sweep);
 }
 
-void report(std::vector<Datum> const& data,Selection const& selection,
-            Bench::SummaryFields const& summary_fields) {
+void report(const std::vector<Datum>& data, const Selection& selection,
+            const Bench::SummaryFields& summary_fields) {
     LOGGING_PRINTLN("ConstraintSolver::reduce() phase benchmark")
     LOGGING_PRINTLN("Workload: 4D identity map, five paving-equivalent constraint"
-        " formulas, 32 fixed dyadic boxes per shape. Inputs prepared outside timing.")
+                    " formulas, 32 fixed dyadic boxes per shape. Inputs prepared outside timing.")
     LOGGING_PRINTLN("Measured workloads overlap; independent phase medians must"
-        " not be added/subtracted as an exact cost attribution.")
-    LOGGING_PRINTLN("samples="<<selection.samples
-        <<" min_sample_ms="<<selection.min_sample_ms
-        <<" max_iterations="<<selection.max_iterations
-        <<" manager=none concurrency=0")
+                    " not be added/subtracted as an exact cost attribution.")
+    LOGGING_PRINTLN("samples=" << selection.samples
+                               << " min_sample_ms=" << selection.min_sample_ms
+                               << " max_iterations=" << selection.max_iterations
+                               << " manager=none concurrency=0")
 
     Bench::Report measurements("ConstraintSolver operation times (ns per sweep)",
                                summary_fields);
     measurements.set_dimension_columns({
-        {"Shape"}, {"Operation"},
-        {"Queries",0u,Bench::TableAlignment::Right},
-        {"Constraints",0u,Bench::TableAlignment::Right},
-        {"Iterations",0u,Bench::TableAlignment::Right},
-        {"Median (ms)",0u,Bench::TableAlignment::Right},
-        {"Median (us/query)",0u,Bench::TableAlignment::Right}
+        {"Shape"},
+        {"Operation"},
+        {"Queries", 0u, Bench::TableAlignment::Right},
+        {"Constraints", 0u, Bench::TableAlignment::Right},
+        {"Iterations", 0u, Bench::TableAlignment::Right},
+        {"Median (ms)", 0u, Bench::TableAlignment::Right},
+        {"Median (us/query)", 0u, Bench::TableAlignment::Right}
     });
-    auto opts=Bench::TableOptions::ruled();
-    opts.group_columns={0u};
+    auto opts = Bench::TableOptions::ruled();
+    opts.group_columns = {0u};
     measurements.set_table_options(opts);
-    for(Datum const& row:data) {
-        measurements.add_row({
-            row.shape,row.operation,std::to_string(row.queries),
-            std::to_string(row.constraints),std::to_string(row.iterations),
-            Bench::Table::number(row.milliseconds,5u),
-            Bench::Table::number(1000.0*row.milliseconds/
-                                static_cast<double>(row.queries),3u)
-        },row.statistics);
+    for (const Datum& row: data) {
+        measurements.add_row({row.shape, row.operation, std::to_string(row.queries),
+                              std::to_string(row.constraints), std::to_string(row.iterations),
+                              Bench::Table::number(row.milliseconds, 5u),
+                              Bench::Table::number(1000.0 * row.milliseconds /
+                                                       static_cast<double>(row.queries),
+                                                   3u)},
+                             row.statistics);
     }
     measurements.print();
 
     Bench::Table ratios({
-        {"Phase"}, {"Cases",0u,Bench::TableAlignment::Right},
-        {"Geomean phase/full",0u,Bench::TableAlignment::Right}
-    },Bench::TableOptions::ruled());
-    for(char const* operation:{
-            "hull_vector_fresh","hull_scalar_fresh",
-            "hull_scalar_cached","box_sweep_post_hull"}) {
-        SizeType cases=0u;
-        double total_log=0.0;
-        for(Datum const& row:data) {
-            if(row.operation!=operation) continue;
-            auto full=std::find_if(data.begin(),data.end(),
-                [&](Datum const& candidate) {
-                    return candidate.shape==row.shape
-                        and candidate.operation=="reduce_full";
-                });
-            if(full==data.end()) throw std::runtime_error("missing full reduce datum");
-            double const ratio=row.milliseconds/full->milliseconds;
-            if(not std::isfinite(ratio) or ratio<=0.0)
+                            {"Phase"},
+                            {"Cases", 0u, Bench::TableAlignment::Right},
+                            {"Geomean phase/full", 0u, Bench::TableAlignment::Right}
+    },
+                        Bench::TableOptions::ruled());
+    for (const char* operation: {
+             "hull_vector_fresh", "hull_scalar_fresh",
+             "hull_scalar_cached", "box_sweep_post_hull"}) {
+        SizeType cases = 0u;
+        double total_log = 0.0;
+        for (const Datum& row: data) {
+            if (row.operation != operation)
+                continue;
+            auto full = std::find_if(data.begin(), data.end(),
+                                     [&](const Datum& candidate) {
+                                         return candidate.shape == row.shape and candidate.operation == "reduce_full";
+                                     });
+            if (full == data.end())
+                throw std::runtime_error("missing full reduce datum");
+            const double ratio = row.milliseconds / full->milliseconds;
+            if (not std::isfinite(ratio) or ratio <= 0.0)
                 throw std::runtime_error("invalid phase ratio");
-            total_log+=std::log(ratio);
+            total_log += std::log(ratio);
             ++cases;
         }
-        if(cases==0u) throw std::runtime_error("missing phase measurements");
-        ratios.add_row({operation,std::to_string(cases),
-            Bench::Table::number(std::exp(total_log/
-                    static_cast<double>(cases)),3u,"x")});
+        if (cases == 0u)
+            throw std::runtime_error("missing phase measurements");
+        ratios.add_row({operation, std::to_string(cases),
+                        Bench::Table::number(std::exp(total_log /
+                                                      static_cast<double>(cases)),
+                                             3u, "x")});
     }
     LOGGING_PRINTLN("Phase median / full-reduce median; <1 means phase faster."
                     " These are not additive cost components.")
@@ -3712,122 +3744,102 @@ void report(std::vector<Datum> const& data,Selection const& selection,
 
 } // namespace
 
-int main(int argc,char const* argv[]) {
+int main(int argc, const char* argv[]) {
     try {
         Selection selection;
         Bench::CommandLine cli;
         cli.add(CommandLineContribution(
             "constraint-solving-reduce-benchmark",
             benchmark_argument_parsers(selection)));
-        if(not cli.acquire(argc,argv)) return 0;
-        selection.warmups=cli.warmups();
-        if(selection.samples<3u or selection.samples%2u==0u)
+        if (not cli.acquire(argc, argv))
+            return 0;
+        selection.warmups = cli.warmups();
+        if (selection.samples < 3u or selection.samples % 2u == 0u)
             throw std::invalid_argument("samples must be odd and >=3");
-        if(selection.prepared_batch_size!=0u
-           and not selection.compare_precompiled_hull)
+        if (selection.prepared_batch_size != 0u and not selection.compare_precompiled_hull)
             throw std::invalid_argument(
                 "--prepared-batch-size requires --compare-precompiled-hull");
-        if(selection.audit_ellipsoid_self_test) {
-            if(not selection.trace_prefix.empty()
-               or selection.compare_contained_skip
-               or selection.compare_dependency_skip
-               or selection.profile_residual_shaving
-               or selection.compare_adaptive_shaving
-               or selection.compare_adaptive_cache
-               or selection.compare_hybrid_shaving
-               or selection.compare_precompiled_hull
-               or selection.audit_resolution_incomparables
-               or selection.audit_all_ellipsoid_contractions)
+        if (selection.audit_ellipsoid_self_test) {
+            if (not selection.trace_prefix.empty() or selection.compare_contained_skip or selection.compare_dependency_skip or selection.profile_residual_shaving or selection.compare_adaptive_shaving or selection.compare_adaptive_cache or selection.compare_hybrid_shaving or selection.compare_precompiled_hull or selection.audit_resolution_incomparables or selection.audit_all_ellipsoid_contractions)
                 throw std::invalid_argument(
                     "ellipsoid self-test cannot be combined with replay modes");
             audit_rotated_ellipsoid_self_test();
             return 0;
         }
-        if(selection.audit_resolution_incomparables) {
-            if(not selection.compare_adaptive_shaving
-               or selection.trace_prefix.empty()
-               or selection.shapes.size()!=1u
-               or selection.shapes.front()!="rotated-ellipsoid")
+        if (selection.audit_resolution_incomparables) {
+            if (not selection.compare_adaptive_shaving or selection.trace_prefix.empty() or selection.shapes.size() != 1u or selection.shapes.front() != "rotated-ellipsoid")
                 throw std::invalid_argument(
                     "--audit-resolution-incomparables requires"
                     " --compare-adaptive-shaving, --trace-prefix and"
                     " --shapes rotated-ellipsoid");
         }
-        if(selection.audit_all_ellipsoid_contractions) {
-            if(not selection.compare_adaptive_shaving
-               or selection.trace_prefix.empty()
-               or selection.shapes.size()!=1u
-               or selection.shapes.front()!="rotated-ellipsoid")
+        if (selection.audit_all_ellipsoid_contractions) {
+            if (not selection.compare_adaptive_shaving or selection.trace_prefix.empty() or selection.shapes.size() != 1u or selection.shapes.front() != "rotated-ellipsoid")
                 throw std::invalid_argument(
                     "--audit-all-ellipsoid-contractions requires"
                     " --compare-adaptive-shaving, --trace-prefix and"
                     " --shapes rotated-ellipsoid");
         }
-        unsigned const modes=
-            static_cast<unsigned>(selection.compare_contained_skip)
-            +static_cast<unsigned>(selection.compare_dependency_skip)
-            +static_cast<unsigned>(selection.profile_residual_shaving)
-            +static_cast<unsigned>(selection.compare_adaptive_shaving)
-            +static_cast<unsigned>(selection.compare_adaptive_cache)
-            +static_cast<unsigned>(selection.compare_hybrid_shaving)
-            +static_cast<unsigned>(selection.compare_precompiled_hull);
-        if(modes>1u)
+        const unsigned modes =
+            static_cast<unsigned>(selection.compare_contained_skip) + static_cast<unsigned>(selection.compare_dependency_skip) + static_cast<unsigned>(selection.profile_residual_shaving) + static_cast<unsigned>(selection.compare_adaptive_shaving) + static_cast<unsigned>(selection.compare_adaptive_cache) + static_cast<unsigned>(selection.compare_hybrid_shaving) + static_cast<unsigned>(selection.compare_precompiled_hull);
+        if (modes > 1u)
             throw std::invalid_argument(
                 "comparison and profiling modes are mutually exclusive");
-        if(not selection.trace_prefix.empty()) {
-            if(selection.compare_precompiled_hull) {
+        if (not selection.trace_prefix.empty()) {
+            if (selection.compare_precompiled_hull) {
                 std::vector<PreparedHullRow> rows;
                 rows.reserve(selection.shapes.size());
-                for(auto const& shape:selection.shapes) {
-                    LOGGING_PRINTLN("Measuring precompiled hull: "<<shape<<" ...")
-                    rows.push_back(compare_precompiled_hull(selection,shape));
-                    LOGGING_PRINTLN("Completed precompiled hull: "<<shape)
+                for (const auto& shape: selection.shapes) {
+                    LOGGING_PRINTLN("Measuring precompiled hull: " << shape << " ...")
+                    rows.push_back(compare_precompiled_hull(selection, shape));
+                    LOGGING_PRINTLN("Completed precompiled hull: " << shape)
                 }
-                print_precompiled_hull_report(rows,selection);
+                print_precompiled_hull_report(rows, selection);
                 return 0;
             }
-            if(selection.compare_hybrid_shaving) {
+            if (selection.compare_hybrid_shaving) {
                 std::vector<HybridRow> rows;
                 rows.reserve(selection.shapes.size());
-                for(std::string const& shape:selection.shapes) {
-                    LOGGING_PRINTLN("Measuring hybrid: "<<shape<<" ...")
-                    rows.push_back(compare_hybrid_shaving(selection,shape));
-                    LOGGING_PRINTLN("Completed hybrid: "<<shape)
+                for (const std::string& shape: selection.shapes) {
+                    LOGGING_PRINTLN("Measuring hybrid: " << shape << " ...")
+                    rows.push_back(compare_hybrid_shaving(selection, shape));
+                    LOGGING_PRINTLN("Completed hybrid: " << shape)
                 }
-                print_hybrid_report(rows,selection);
+                print_hybrid_report(rows, selection);
                 return 0;
             }
-            for(std::string const& shape:selection.shapes) {
-                if(selection.compare_contained_skip) {
-                    compare_contained_skip(selection,shape);
-                } else if(selection.compare_dependency_skip) {
-                    compare_dependency_skip(selection,shape);
-                } else if(selection.profile_residual_shaving) {
-                    profile_residual_shaving(selection,shape);
-                } else if(selection.compare_adaptive_shaving) {
-                    compare_adaptive_shaving(selection,shape);
-                } else if(selection.compare_adaptive_cache) {
-                    compare_adaptive_cache(selection,shape);
+            for (const std::string& shape: selection.shapes) {
+                if (selection.compare_contained_skip) {
+                    compare_contained_skip(selection, shape);
+                } else if (selection.compare_dependency_skip) {
+                    compare_dependency_skip(selection, shape);
+                } else if (selection.profile_residual_shaving) {
+                    profile_residual_shaving(selection, shape);
+                } else if (selection.compare_adaptive_shaving) {
+                    compare_adaptive_shaving(selection, shape);
+                } else if (selection.compare_adaptive_cache) {
+                    compare_adaptive_cache(selection, shape);
                 } else {
                     profile_adaptive_trace(
-                        selection.trace_prefix,shape,selection.verify_only);
+                        selection.trace_prefix, shape, selection.verify_only);
                 }
             }
             return 0;
         }
-        if(modes!=0u)
+        if (modes != 0u)
             throw std::invalid_argument(
                 "comparison or profiling mode requires --trace-prefix");
         std::vector<Datum> results;
-        for(std::string const& shape:selection.shapes) {
-            std::cout<<"Measuring "<<shape
-                     <<" | d=4 | queries=32\n";
-            append_case(results,selection,shape);
+        for (const std::string& shape: selection.shapes) {
+            std::cout << "Measuring " << shape
+                      << " | d=4 | queries=32\n";
+            append_case(results, selection, shape);
         }
-        if(not selection.verify_only) report(results,selection,cli.summary_fields());
+        if (not selection.verify_only)
+            report(results, selection, cli.summary_fields());
         return 0;
-    } catch(std::exception const& error) {
-        LOGGING_PRINTLN("benchmark_constraint_reduce: "<<error.what())
+    } catch (const std::exception& error) {
+        LOGGING_PRINTLN("benchmark_constraint_reduce: " << error.what())
         return 1;
     }
 }

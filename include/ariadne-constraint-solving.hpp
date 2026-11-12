@@ -30,7 +30,6 @@
 #define ARIADNE_CONSTRAINT_SOLVING_HPP
 
 #include "ariadne-nonlinear-programming.hpp"
-
 #include "constraint-solving/constraint_solver.hpp"
 
 #endif

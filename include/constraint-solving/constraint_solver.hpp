@@ -33,39 +33,42 @@
 #include <optional>
 #include <vector>
 
-#include "logging/logging.hpp"
-#include "utility/container.hpp"
-
-#include "numeric/declarations.hpp"
 #include "algebra/declarations.hpp"
+#include "foundation/logical.hpp"
+#include "function/constraint.hpp"
 #include "function/declarations.hpp"
 #include "geometry/declarations.hpp"
-#include "foundation/logical.hpp"
+#include "logging/logging.hpp"
+#include "numeric/declarations.hpp"
 #include "numeric/numeric.hpp"
-#include "function/constraint.hpp"
+#include "utility/container.hpp"
 // Declares the Vector<Procedure<Y>> specialization used by this interface.
 #include "function/procedure.hpp"
-
 
 namespace Ariadne {
 
 /** @brief Declare the parametric constraint type used by propagation. */
-template<class X, class R> class Constraint;
+template<class X, class R>
+class Constraint;
 
 /** @brief Declare a compiled numerical procedure. */
-template<class X> class Procedure;
+template<class X>
+class Procedure;
 typedef Procedure<ValidatedNumber> ValidatedProcedure;
 /** @brief Declare detailed statistics for procedure-based hull contraction. */
 struct ProcedureHullReductionStatistics;
 
 /** @brief Declare the Taylor model used by validated function patches. */
-template<class P,class F> class TaylorModel;
+template<class P, class F>
+class TaylorModel;
 /** @brief Declare a scaled vector function patch. */
-template<class M> class VectorScaledFunctionPatch;
-typedef VectorScaledFunctionPatch<TaylorModel<ValidatedTag,FloatDP>> ValidatedVectorMultivariateTaylorFunctionModelDP;
+template<class M>
+class VectorScaledFunctionPatch;
+typedef VectorScaledFunctionPatch<TaylorModel<ValidatedTag, FloatDP>> ValidatedVectorMultivariateTaylorFunctionModelDP;
 
 /** @brief Store primal, dual and slack variables for a feasibility iteration. */
-template<class X> struct FeasibilityState {
+template<class X>
+struct FeasibilityState {
     X t;
     Vector<X> x;
     Vector<X> y;
@@ -117,19 +120,20 @@ struct ConstraintPropagationConstraint {
     std::shared_ptr<const ValidatedProcedure> hull_procedure = nullptr;
 };
 
-
 //! \ingroup OptimisationSubModule
 //! \brief A class for finding solutions of systems of constraints of the form \f$g(y) \leq c\f$.
 class ConstraintSolverInterface {
-    using FLT=FloatDP;
+    using FLT = FloatDP;
+
   public:
     typedef Point<FLT> ExactPointType;
     typedef FLT ExactNumericType;
     typedef Bounds<FLT> ValidatedNumericType;
     typedef Approximation<FLT> ApproximateNumericType;
+
   public:
     //! \brief Test if the image of the box \a domain under the function \a function intersects \a codomain.
-    virtual Pair<ValidatedKleenean,ExactPointType> feasible(const ExactBoxType& domain, const ValidatedVectorMultivariateFunction& function, const ExactBoxType& codomain) const = 0;
+    virtual Pair<ValidatedKleenean, ExactPointType> feasible(const ExactBoxType& domain, const ValidatedVectorMultivariateFunction& function, const ExactBoxType& codomain) const = 0;
     //! \brief Test if \a point is in \a domain and the image of \a point under the function \a function lies in \a codomain.
     virtual ValidatedKleenean check_feasibility(const ExactBoxType& domain, const ValidatedVectorMultivariateFunction& function, const ExactBoxType& codomain, const ExactPointType& point) const = 0;
     //! \brief Try to reduce the size of the domain by propagating interval constraints. Returns \c true if the reduced domain is empty.
@@ -138,8 +142,6 @@ class ConstraintSolverInterface {
     /** @brief Destroy a constraint solver through its abstract interface. */
     virtual ~ConstraintSolverInterface() = default;
 };
-
-
 
 //! \brief An explicitly owned immutable vector function and compiled hull procedure.
 //! \details Safe to reuse across calls with different codomains while the
@@ -152,6 +154,7 @@ class PreparedConstraintSolverFunction {
     struct Data;
     std::shared_ptr<const Data> _data;
     friend class ConstraintSolver;
+
   public:
     /** @brief Compile and own a vector function for repeated constraint propagation. */
     explicit PreparedConstraintSolverFunction(
@@ -165,11 +168,10 @@ class PreparedConstraintSolverFunction {
 //! \ingroup OptimisationSubModule
 //! \brief A class for finding solutions of systems of constraints of the form \f$g(y) \leq c\f$.
 class ConstraintSolver
-    : public ConstraintSolverInterface
-{
+    : public ConstraintSolverInterface {
   public:
     //! \brief Test if the image of the box \a domain under the function \a function intersects \a codomain.
-    Pair<ValidatedKleenean,ExactPointType> feasible(const ExactBoxType& domain, const ValidatedVectorMultivariateFunction& function, const ExactBoxType& codomain) const override;
+    Pair<ValidatedKleenean, ExactPointType> feasible(const ExactBoxType& domain, const ValidatedVectorMultivariateFunction& function, const ExactBoxType& codomain) const override;
     //! \brief Test if \a point is in \a domain and the image of \a point under the function \a function lies in \a codomain.
     ValidatedKleenean check_feasibility(const ExactBoxType& domain, const ValidatedVectorMultivariateFunction& function, const ExactBoxType& codomain, const ExactPointType& point) const override;
     //! \brief Try to reduce the size of the domain by propagating interval constraints.
@@ -179,9 +181,8 @@ class ConstraintSolver
     //! The prepared data may be shared between calls; call-local state is not.
     Bool reduce(UpperBoxType& domain, const PreparedConstraintSolverFunction& prepared, const ExactBoxType& codomain) const;
 
-
     //! \brief Test if the constraints are solvable using a nonlinear feasibility test. Returns an approximate feasible point if the result is true. (Deprecated)
-    virtual Pair<ValidatedKleenean,ExactPointType> feasible(const ExactBoxType& domain, const List<ValidatedConstraint>& constraints) const;
+    virtual Pair<ValidatedKleenean, ExactPointType> feasible(const ExactBoxType& domain, const List<ValidatedConstraint>& constraints) const;
     //! \brief Try to reduce the size of the domain by propagating interval constraints. (Deprecated)
     virtual Bool reduce(UpperBoxType& domain, const List<ValidatedConstraint>& constraints) const;
 
@@ -192,8 +193,8 @@ class ConstraintSolver
         UpperBoxType& domain,
         const List<ValidatedConstraint>& constraints,
         ConstraintPropagationStatistics& statistics,
-        Bool shaving_reduction_enabled=true,
-        Bool hull_reduction_enabled=true) const;
+        Bool shaving_reduction_enabled = true,
+        Bool hull_reduction_enabled = true) const;
 
     //! \brief Propagate precompiled numerical constraints, optionally using
     //! derivative-assisted monotone contraction after hull/shaving stall.
@@ -202,8 +203,8 @@ class ConstraintSolver
         const std::vector<ConstraintPropagationConstraint>& constraints,
         Bool monotone_reduction_enabled,
         ConstraintPropagationStatistics& statistics,
-        Bool shaving_reduction_enabled=true,
-        Bool hull_reduction_enabled=true) const;
+        Bool shaving_reduction_enabled = true,
+        Bool hull_reduction_enabled = true) const;
 
     //! \brief Apply exactly one cached/full-scan hull propagation sweep.
     //! \details Returns true iff the sweep proves the domain empty. No shaving
@@ -252,20 +253,24 @@ class ConstraintSolver
                          const ExactIntervalType&, SizeType j) const;
 
     //! Split the domain into two pieces to help try to solve the constraints.
-    Pair<UpperBoxType,UpperBoxType> split(const UpperBoxType& domain, const ValidatedVectorMultivariateFunction& function, const ExactBoxType& codomain) const;
+    Pair<UpperBoxType, UpperBoxType> split(const UpperBoxType& domain, const ValidatedVectorMultivariateFunction& function, const ExactBoxType& codomain) const;
 
     /** @brief Contract the box using the given validated constraint. */
     Bool hull_reduce(UpperBoxType& bx, const ValidatedConstraint& constraint) const {
-        return this->hull_reduce(bx,constraint.function(),constraint.bounds()); }
+        return this->hull_reduce(bx, constraint.function(), constraint.bounds());
+    }
     /** @brief Apply coordinate shaving to the given validated constraint. */
     Bool box_reduce(UpperBoxType& bx, const ValidatedConstraint& constraint, SizeType j) const {
-        return this->box_reduce(bx,constraint.function(),constraint.bounds(),j); }
+        return this->box_reduce(bx, constraint.function(), constraint.bounds(), j);
+    }
     /** @brief Apply monotone reduction to the given validated constraint. */
     Bool monotone_reduce(UpperBoxType& bx, const ValidatedConstraint& constraint, SizeType j) const {
-        return this->monotone_reduce(bx,constraint.function(),constraint.bounds(),j); }
+        return this->monotone_reduce(bx, constraint.function(), constraint.bounds(), j);
+    }
 
     /** @brief Destroy the constraint solver. */
     ~ConstraintSolver() override = default;
+
   private:
     /** @brief Contract the box using an existing compiled hull procedure. */
     Bool _reduce_with_hull(
@@ -275,7 +280,6 @@ class ConstraintSolver
         const ExactBoxType& codomain) const;
 };
 
-
-} //namespace Ariadne
+} // namespace Ariadne
 
 #endif
