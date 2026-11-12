@@ -44,6 +44,5 @@ cmake --build build-release --parallel --target ariadne-constraint-solving bindi
 cmake --install build-release --prefix /path/to/install
 ```
 
-See `tutorial/tutorial_constraint_solving.cpp` and `python/tutorial.py` for examples of both propagation and feasibility.
 
 **Validation semantics:** propagation returns true when inconsistency is proved, even if the closed interval box remains nonempty for strict inequalities. Feasibility results may be indeterminate, and a numerical candidate is not automatically a certified existence witness.
