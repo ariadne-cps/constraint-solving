@@ -38,6 +38,7 @@
 #include "function/taylor_function.hpp"
 #include "geometry/box.hpp"
 #include "logging/logging.hpp"
+#include "logging/test_runner.hpp"
 #include "numeric/numeric.hpp"
 
 #include "ariadne-testing.hpp"
@@ -2046,13 +2047,6 @@ class TestConstraintSolver : public Ariadne::Testing::ContextFixture {
 };
 
 int main(int argc, char** argv) {
-    // Keep solver logging code exercised while routing test diagnostics
-    // exclusively through Ariadne Testing.
-#ifdef _WIN32
-    Logger::instance().redirect_to_file("NUL");
-#else
-    Logger::instance().redirect_to_file("/dev/null");
-#endif
     ARIADNE_TESTING_SUITE("test_constraint_solver");
     ARIADNE_TESTING_ADD_TEST(TestConstraintSolver, test_empty_reduce_inequality);
     ARIADNE_TESTING_ADD_TEST(TestConstraintSolver, test_empty_reduce_equality);
@@ -2078,5 +2072,5 @@ int main(int argc, char** argv) {
     ARIADNE_TESTING_ADD_TEST(TestConstraintSolver, test_feasible);
     ARIADNE_TESTING_ADD_TEST(TestConstraintSolver, test_split);
     ARIADNE_TESTING_ADD_TEST(TestConstraintSolver, test_virtual_destruction);
-    return ARIADNE_TESTING_RUN_TESTS_WITH_ARGS(argc, argv);
+    return Ariadne::Testing::run_logging_suite(ariadne_test_suite, argc, argv);
 }
